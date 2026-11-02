@@ -496,7 +496,9 @@ fn branch_name(ctx: &Ctx, root: usize, from: usize) -> String {
             stack.push((v, u, np));
         }
     }
-    let (an, path) = best.unwrap();
+    let Some((an, path)) = best else {
+        return "yl".into();
+    };
     let len = path.len();
     let attach_order = order_between(ctx, root, from);
     let stem = STEMS.get(len - 1).copied().unwrap_or("alk");

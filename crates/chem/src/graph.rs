@@ -189,20 +189,18 @@ impl MolGraph {
     }
 }
 
+const SUB: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+const SUP: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+
 pub fn subscript(n: usize) -> String {
     n.to_string()
         .chars()
-        .map(|c| char::from_u32('₀' as u32 + c.to_digit(10).unwrap()).unwrap())
+        .map(|c| c.to_digit(10).map_or(c, |d| SUB[d as usize % 10]))
         .collect()
 }
 
 pub fn superscript_digit(d: u32) -> char {
-    match d {
-        1 => '¹',
-        2 => '²',
-        3 => '³',
-        _ => char::from_u32('⁰' as u32 + d).unwrap(),
-    }
+    SUP[d as usize % 10]
 }
 
 /// "", "⁺", "²⁻", ...
@@ -213,7 +211,7 @@ pub fn charge_superscript(q: i32) -> String {
     let mut s = String::new();
     if q.abs() > 1 {
         for c in q.abs().to_string().chars() {
-            s.push(superscript_digit(c.to_digit(10).unwrap()));
+            s.push(c.to_digit(10).map_or(c, superscript_digit));
         }
     }
     s.push(if q > 0 { '⁺' } else { '⁻' });

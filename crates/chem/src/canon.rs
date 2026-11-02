@@ -85,7 +85,7 @@ fn dfs_ring(
     rings: &mut Vec<Vec<usize>>,
     seen: &mut Vec<Vec<usize>>,
 ) {
-    let u = *path.last().unwrap();
+    let Some(&u) = path.last() else { return };
     for &(v, _) in g.neighbors(u) {
         if v == s && path.len() == 6 {
             let mut key = path.clone();

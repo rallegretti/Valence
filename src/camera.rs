@@ -8,7 +8,8 @@ use bevy::{
     prelude::*,
 };
 
-use crate::state::{Chem, Pointer};
+use crate::state::{Chem, Drag, Pointer};
+use bevy_egui::input::EguiWantsInput;
 
 #[derive(Component)]
 pub struct OrbitCam {
@@ -30,6 +31,18 @@ impl Default for OrbitCam {
 }
 
 impl OrbitCam {
+    /// Recover from any non-finite state rather than rendering garbage.
+    pub fn sanitize(&mut self) {
+        if !(self.focus.is_finite()
+            && self.yaw.is_finite()
+            && self.pitch.is_finite()
+            && self.dist.is_finite())
+        {
+            *self = OrbitCam::default();
+        }
+        self.focus = self.focus.clamp(Vec3::splat(-5000.0), Vec3::splat(5000.0));
+    }
+
     pub fn transform(&self) -> Transform {
         let rot = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
         Transform::from_translation(self.focus + rot * Vec3::Z * self.dist).with_rotation(rot)
@@ -90,11 +103,13 @@ pub fn orbit_controls(
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     pointer: Res<Pointer>,
+    drag: Res<Drag>,
+    egui: Res<EguiWantsInput>,
     chem: Res<Chem>,
     mut gesture: Local<Gesture>,
 ) {
     let (rig, transform) = &mut *cam;
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
 
     if pointer.in_scene {
         if buttons.just_pressed(MouseButton::Right) {
@@ -103,12 +118,21 @@ pub fn orbit_controls(
         if buttons.just_pressed(MouseButton::Middle) {
             *gesture = Gesture::Pan;
         }
+        // Left-drag on empty space also orbits (Shift: pans), for trackpads
+        // and one-button mice.
+        if buttons.just_pressed(MouseButton::Left)
+            && pointer.hovered_atom.is_none()
+            && *drag == Drag::None
+        {
+            *gesture = if shift { Gesture::Pan } else { Gesture::Orbit };
+        }
     }
-    if !buttons.pressed(MouseButton::Right) && !buttons.pressed(MouseButton::Middle) {
+    if !buttons.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]) {
         *gesture = Gesture::Idle;
     }
 
-    let d = motion.delta;
+    // Clamp per-frame motion so a hitch or focus change can't fling the view.
+    let d = motion.delta.clamp(Vec2::splat(-200.0), Vec2::splat(200.0));
     match *gesture {
         Gesture::Orbit => {
             rig.yaw -= d.x * 0.006;
@@ -128,13 +152,14 @@ pub fn orbit_controls(
             MouseScrollUnit::Line => scroll.delta.y,
             MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
         };
-        rig.dist = (rig.dist * (1.0 - lines * 0.1)).clamp(2.5, 200.0);
+        rig.dist = (rig.dist * (1.0 - lines.clamp(-5.0, 5.0) * 0.1)).clamp(2.5, 200.0);
     }
 
-    if keys.just_pressed(KeyCode::KeyF) && !chem.lab.is_empty() {
+    if keys.just_pressed(KeyCode::KeyF) && !egui.wants_keyboard_input() {
         frame_all(rig, &chem);
     }
 
+    rig.sanitize();
     let t = rig.transform();
     if **transform != t {
         **transform = t;
@@ -143,7 +168,12 @@ pub fn orbit_controls(
 
 /// Point the camera at everything in the lab.
 pub fn frame_all(rig: &mut OrbitCam, chem: &Chem) {
-    let pts: Vec<Vec3> = chem.lab.atoms().map(|(_, a)| a.pos).collect();
+    let pts: Vec<Vec3> = chem
+        .lab
+        .atoms()
+        .map(|(_, a)| a.pos)
+        .filter(|p| p.is_finite())
+        .collect();
     if pts.is_empty() {
         *rig = OrbitCam::default();
         return;

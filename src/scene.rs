@@ -79,9 +79,20 @@ pub fn setup_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
-    let sphere = meshes.add(Sphere::new(1.0).mesh().ico(4).expect("valid icosphere"));
+    // ico() only fails above 80 subdivisions; fall back to a UV sphere anyway.
+    let sphere = meshes.add(
+        Sphere::new(1.0)
+            .mesh()
+            .ico(4)
+            .unwrap_or_else(|_| Sphere::new(1.0).mesh().uv(32, 18)),
+    );
     let tube = meshes.add(Cylinder::new(1.0, 1.0).mesh().resolution(24));
-    let dot = meshes.add(Sphere::new(1.0).mesh().ico(2).expect("valid icosphere"));
+    let dot = meshes.add(
+        Sphere::new(1.0)
+            .mesh()
+            .ico(2)
+            .unwrap_or_else(|_| Sphere::new(1.0).mesh().uv(12, 8)),
+    );
     let glow = |c: palette::Rgb, k: f32| LinearRgba::from(srgb(c)) * k;
     let bond = mats.add(StandardMaterial {
         base_color: Color::srgb(0.93, 0.93, 0.95),
@@ -293,7 +304,9 @@ pub fn sync_structure(
         }
         let q = lab.charge(id);
         if q != 0 {
-            let z = lab.atom(id).unwrap().z;
+            let Some(z) = lab.atom(id).map(|a| a.z) else {
+                continue;
+            };
             commands.spawn((
                 Mesh3d(assets.sphere.clone()),
                 MeshMaterial3d(if q > 0 {
@@ -460,5 +473,5 @@ pub fn step_physics(mut chem: ResMut<Chem>, drag: Res<Drag>) {
         Drag::Atom { atom, .. } => Some(atom),
         _ => None,
     };
-    chem.lab.relax(3, pinned);
+    chem.relax(3, pinned);
 }

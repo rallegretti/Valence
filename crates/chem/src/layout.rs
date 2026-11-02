@@ -75,13 +75,15 @@ impl Lab {
             max_move = 0.0;
             let ids: Vec<AtomId> = self.atoms().map(|(id, _)| id).collect();
             for id in ids {
-                let a = self.atom_mut(id).unwrap();
+                let Some(a) = self.atom_mut(id) else { continue };
                 if Some(id) == pinned {
                     a.vel = Vec3::ZERO;
                     continue;
                 }
-                let f = force[id as usize];
-                if !f.is_finite() {
+                let f = force.get(id as usize).copied().unwrap_or(Vec3::ZERO);
+                // Never let a NaN/inf (e.g. from coincident atoms) poison the
+                // scene: drop the bad step and stop the atom instead.
+                if !f.is_finite() || !a.vel.is_finite() {
                     a.vel = Vec3::ZERO;
                     continue;
                 }
@@ -90,8 +92,13 @@ impl Lab {
                 if len > MAX_MOVE {
                     v *= MAX_MOVE / len;
                 }
+                let next = a.pos + v;
+                if !next.is_finite() {
+                    a.vel = Vec3::ZERO;
+                    continue;
+                }
                 a.vel = v;
-                a.pos += v;
+                a.pos = next;
                 max_move = max_move.max(len.min(MAX_MOVE));
             }
         }
@@ -108,8 +115,10 @@ impl Lab {
 
     fn bond_forces(&self, force: &mut [Vec3]) {
         for (_, b) in self.bonds() {
-            let (pa, za) = self.atom(b.a).map(|a| (a.pos, a.z)).unwrap();
-            let (pb, zb) = self.atom(b.b).map(|a| (a.pos, a.z)).unwrap();
+            let (Some(aa), Some(ab)) = (self.atom(b.a), self.atom(b.b)) else {
+                continue;
+            };
+            let ((pa, za), (pb, zb)) = ((aa.pos, aa.z), (ab.pos, ab.z));
             let d = pb - pa;
             let len = d.length().max(1e-4);
             let target = bond_length(za, zb, b.order, b.kind);
@@ -123,12 +132,14 @@ impl Lab {
         let ids: Vec<AtomId> = self.atoms().map(|(id, _)| id).collect();
         let mut nbrs: Vec<(AtomId, Vec3, f32)> = Vec::with_capacity(8);
         for id in ids {
-            let a = self.atom(id).unwrap();
+            let Some(a) = self.atom(id) else { continue };
             let center = a.pos;
             let free = self.free(id) as usize;
             nbrs.clear();
             for (n, b) in self.neighbors(id) {
-                let p = self.atom(n).unwrap().pos;
+                let Some(p) = self.atom(n).map(|a| a.pos) else {
+                    continue;
+                };
                 let r = p - center;
                 let len = r.length().max(1e-4);
                 // Ionic neighbours are weaker domains: ions arrange more loosely.
@@ -185,7 +196,9 @@ impl Lab {
             for (d, p) in domains.iter_mut().zip(dom_push) {
                 *d = (*d + p * 0.2).normalize_or(*d);
             }
-            self.atom_mut(id).unwrap().domains = domains;
+            if let Some(a) = self.atom_mut(id) {
+                a.domains = domains;
+            }
         }
     }
 
@@ -277,7 +290,7 @@ mod tests {
     #[test]
     fn methane_is_tetrahedral() {
         let mut lab = Lab::new();
-        let c = lab.add_atom(6, Vec3::ZERO);
+        let c = lab.add_atom(6, Vec3::ZERO).unwrap();
         let hs: Vec<_> = (0..4)
             .map(|i| lab.attach(c, 1, Vec3::new(i as f32, 1.0, 0.3)).unwrap())
             .collect();
@@ -289,10 +302,10 @@ mod tests {
     #[test]
     fn water_is_bent_and_co2_linear() {
         let mut lab = Lab::new();
-        let o = lab.add_atom(8, Vec3::ZERO);
+        let o = lab.add_atom(8, Vec3::ZERO).unwrap();
         let h1 = lab.attach(o, 1, Vec3::X).unwrap();
         let h2 = lab.attach(o, 1, Vec3::Y).unwrap();
-        let c = lab.add_atom(6, Vec3::new(20.0, 0.0, 0.0));
+        let c = lab.add_atom(6, Vec3::new(20.0, 0.0, 0.0)).unwrap();
         let o1 = lab.attach(c, 8, Vec3::X).unwrap();
         let o2 = lab.attach(c, 8, Vec3::Y).unwrap();
         settle(&mut lab);
@@ -305,7 +318,7 @@ mod tests {
     #[test]
     fn goes_to_sleep() {
         let mut lab = Lab::new();
-        let c = lab.add_atom(6, Vec3::ZERO);
+        let c = lab.add_atom(6, Vec3::ZERO).unwrap();
         for _ in 0..4 {
             lab.attach(c, 1, Vec3::X).unwrap();
         }
@@ -323,7 +336,7 @@ mod ring_tests {
     use glam::Vec3;
 
     pub(crate) fn benzene(lab: &mut Lab) -> Vec<u32> {
-        let c0 = lab.add_atom(6, Vec3::ZERO);
+        let c0 = lab.add_atom(6, Vec3::ZERO).unwrap();
         let mut ring = vec![c0];
         for _ in 0..5 {
             let last = *ring.last().unwrap();
@@ -394,7 +407,7 @@ mod perf {
         // 50 hexanes (C6H14) = 1000 atoms.
         for m in 0..50 {
             let base = Vec3::new((m % 8) as f32 * 12.0, (m / 8) as f32 * 12.0, 0.0);
-            let mut prev = lab.add_atom(6, base);
+            let mut prev = lab.add_atom(6, base).unwrap();
             let mut carbons = vec![prev];
             for _ in 0..5 {
                 prev = lab.attach(prev, 6, Vec3::X).unwrap();

@@ -206,6 +206,7 @@ pub enum TablePos {
 }
 
 pub fn table_pos(z: u8) -> TablePos {
+    let z = z.clamp(1, 118);
     let (period, first) = match z {
         1..=2 => (1, 1),
         3..=10 => (2, 3),

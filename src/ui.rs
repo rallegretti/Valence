@@ -22,7 +22,7 @@ use valence_chem::{
 
 use crate::camera::{OrbitCam, frame_all};
 use crate::palette::{self, ANION, BAD, CATION, GOOD, OPEN_SITE, to_egui};
-use crate::state::{Chem, Drag, Effects, Pointer, Selection, Settings, ViewRect};
+use crate::state::{Chem, Drag, Edit, Effects, Pointer, Selection, Settings, ViewRect};
 
 const PANEL_BG: Color32 = Color32::from_rgb(17, 19, 25);
 const CARD_BG: Color32 = Color32::from_rgb(26, 29, 37);
@@ -105,11 +105,13 @@ pub fn ui_system(
             .layer_id(LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
+    // Keep at least ~240 px of 3D view however narrow the window gets.
+    let max_panel = (window.width() - 240.0).clamp(300.0, 1100.0);
     let panel = egui::Panel::left("periodic_table")
         .resizable(true)
-        .default_size(620.0)
-        .min_size(460.0)
-        .max_size(1100.0)
+        .default_size(620.0f32.min(max_panel))
+        .min_size(300.0f32.min(max_panel))
+        .max_size(max_panel)
         .frame(egui::Frame::new().fill(PANEL_BG).inner_margin(14.0))
         .show(&mut root, |ui| {
             panel(
@@ -127,18 +129,30 @@ pub fn ui_system(
     let left = panel.response.rect.width();
 
     // 3D viewport = everything right of the panel.
+    // A minimised or degenerate window has no room for a viewport: render
+    // full-window (invisible anyway) instead of handing the GPU a bad rect.
     let scale = window.scale_factor();
-    let phys_left = ((left * scale) as u32).min(window.physical_width().saturating_sub(1));
-    let size = UVec2::new(
-        window.physical_width().saturating_sub(phys_left).max(1),
-        window.physical_height().max(1),
+    let (pw, ph) = (window.physical_width(), window.physical_height());
+    let phys_left = if left.is_finite() {
+        (left.max(0.0) * scale) as u32
+    } else {
+        0
+    };
+    cam.viewport = if pw > phys_left + 1 && ph > 1 {
+        Some(Viewport {
+            physical_position: UVec2::new(phys_left, 0),
+            physical_size: UVec2::new(pw - phys_left, ph),
+            ..default()
+        })
+    } else {
+        None
+    };
+    view.0 = Rect::new(
+        left.min(window.width()),
+        0.0,
+        window.width(),
+        window.height(),
     );
-    cam.viewport = Some(Viewport {
-        physical_position: UVec2::new(phys_left, 0),
-        physical_size: size,
-        ..default()
-    });
-    view.0 = Rect::new(left, 0.0, window.width(), window.height());
 
     overlays(
         &ctx,
@@ -320,27 +334,29 @@ fn click_add(
     if let Some(sel) = selection.atom
         && let Some(at) = chem.lab.atom(sel).map(|a| a.pos)
     {
-        match chem.lab.check_attach(sel, z) {
-            Ok(plan) => {
-                if let Ok(id) = chem.lab.attach(sel, z, Vec3::Y) {
-                    effects.push(at, plan.note, true, now);
-                    // Keep building on the same atom while it has room.
-                    if chem.lab.free(sel) == 0 && chem.lab.free(id) > 0 {
-                        selection.atom = Some(id);
-                    }
-                }
-                return;
-            }
-            Err(e) => {
-                effects.push(at, e.0, false, now);
-                return;
-            }
+        let note = chem
+            .lab
+            .check_attach(sel, z)
+            .map(|p| p.note)
+            .unwrap_or_default();
+        let edit = chem.edit("attach", |lab| lab.attach(sel, z, Vec3::Y));
+        effects.report(&edit, at, &note, now);
+        // Keep building on the same atom while it has room.
+        if let Edit::Done(id) = edit
+            && chem.lab.free(sel) == 0
+            && chem.lab.free(id) > 0
+        {
+            selection.atom = Some(id);
         }
+        return;
     }
     let n = chem.lab.atom_count() as f32;
     let jitter = Vec3::new((n * 2.4).sin(), (n * 1.7).cos(), (n * 0.9).sin()) * 1.8;
-    let id = chem.lab.add_atom(z, rig.focus + jitter);
-    selection.atom = Some(id);
+    let p = rig.focus + jitter;
+    match chem.edit("add", |lab| lab.add_atom(z, p)) {
+        Edit::Done(id) => selection.atom = Some(id),
+        other => effects.report(&other, p, "", now),
+    }
 }
 
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
@@ -540,17 +556,38 @@ fn controls(
         if ui.button("Frame all (F)").clicked() {
             frame_all(rig, chem);
         }
-        if ui.button("Clear lab").clicked() {
-            chem.lab.clear();
+        if ui
+            .add_enabled(chem.can_undo(), egui::Button::new("↶ Undo"))
+            .on_hover_text("Ctrl/Cmd+Z")
+            .clicked()
+        {
+            chem.undo();
+        }
+        if ui
+            .add_enabled(chem.can_redo(), egui::Button::new("↷ Redo"))
+            .on_hover_text("Ctrl/Cmd+Shift+Z")
+            .clicked()
+        {
+            chem.redo();
+        }
+        if ui
+            .add_enabled(!chem.lab.is_empty(), egui::Button::new("Clear lab"))
+            .clicked()
+        {
+            let _ = chem.edit("clear", |lab| {
+                lab.clear();
+                Ok(())
+            });
             selection.atom = None;
         }
     });
     ui.add_space(6.0);
     ui.label(
         RichText::new(
-            "Left-drag atom: move molecule · Shift+drag: move one atom (close rings)\n\
-             Drop an atom on another: bond them · Right-drag: orbit · Middle/Shift+right: pan\n\
-             Scroll: zoom · Right-click / Delete: remove atom · Esc: cancel drag",
+            "Drag atom: move molecule · Shift+drag atom: move one atom (close rings)\n\
+             Drop an atom on another: bond them · Drag empty space: orbit · Shift+drag: pan\n\
+             Right/middle-drag also orbit/pan · Scroll or pinch: zoom · F: frame all\n\
+             Right-click or Delete/Backspace: remove atom · Ctrl/Cmd+Z: undo · Esc: cancel",
         )
         .size(11.5)
         .color(MUTED),
@@ -644,7 +681,9 @@ fn overlays(
             {
                 continue;
             }
-            let a = chem.lab.atom(p.id).unwrap();
+            let Some(a) = chem.lab.atom(p.id) else {
+                continue;
+            };
             let c = palette::element_color(a.z);
             let tc = if palette::luminance(c) > 0.5 {
                 Color32::from_gray(10)
@@ -703,15 +742,34 @@ fn overlays(
     }
 
     // Molecule name tags under each molecule.
+    // Placed in priority order (focused molecule, then nearest first); a tag
+    // that would overlap one already placed is skipped to avoid clutter.
     if settings.show_names {
-        for m in &chem.molecules {
+        let focus = pointer
+            .hovered_atom
+            .or(selection.atom)
+            .and_then(|a| chem.atom_mol.get(a as usize).copied());
+        let mut tags: Vec<(bool, f32, usize, Pos2)> = Vec::new();
+        for (i, m) in chem.molecules.iter().enumerate() {
             let pts: Vec<&Projected> = m.atoms.iter().filter_map(|&a| screen_of(a)).collect();
             if pts.is_empty() {
                 continue;
             }
             let cx = pts.iter().map(|p| p.pos.x).sum::<f32>() / pts.len() as f32;
             let bottom = pts.iter().map(|p| p.pos.y + p.r).fold(f32::MIN, f32::max);
-            name_tag(&painter, ctx, &m.names, pos2(cx, bottom + 12.0));
+            let depth = pts.iter().map(|p| p.depth).fold(f32::MAX, f32::min);
+            let cy = pts.iter().map(|p| p.pos.y).sum::<f32>() / pts.len() as f32;
+            if !clip.contains(pos2(cx, cy)) {
+                continue; // molecule is (mostly) off-screen
+            }
+            tags.push((focus != Some(i), depth, i, pos2(cx, bottom + 12.0)));
+        }
+        tags.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let mut placed: Vec<egui::Rect> = Vec::with_capacity(tags.len());
+        for (_, _, i, at) in tags {
+            if let Some(m) = chem.molecules.get(i) {
+                name_tag(&painter, ctx, &m.names, at, clip, &mut placed);
+            }
         }
     }
 
@@ -829,7 +887,14 @@ fn tooltip(p: &egui::Painter, ctx: &egui::Context, at: Pos2, text: &str, col: Co
     p.galley(rect.min + vec2(6.0, 6.0), galley, col);
 }
 
-fn name_tag(p: &egui::Painter, ctx: &egui::Context, n: &Names, top_center: Pos2) {
+fn name_tag(
+    p: &egui::Painter,
+    ctx: &egui::Context,
+    n: &Names,
+    top_center: Pos2,
+    clip: egui::Rect,
+    placed: &mut Vec<egui::Rect>,
+) {
     let mut job = egui::text::LayoutJob::default();
     let fmt = |font: FontId, color: Color32| egui::TextFormat {
         font_id: font,
@@ -862,8 +927,18 @@ fn name_tag(p: &egui::Painter, ctx: &egui::Context, n: &Names, top_center: Pos2)
     job.halign = egui::Align::Center;
     let galley = ctx.fonts_mut(|f| f.layout_job(job));
     let size = galley.size();
-    let rect = egui::Rect::from_min_size(pos2(top_center.x - size.x / 2.0, top_center.y), size)
+    let mut rect = egui::Rect::from_min_size(pos2(top_center.x - size.x / 2.0, top_center.y), size)
         .expand2(vec2(8.0, 5.0));
+    // Nudge the tag fully inside the 3D view.
+    let dx =
+        (clip.left() + 4.0 - rect.left()).max(0.0) + (clip.right() - 4.0 - rect.right()).min(0.0);
+    let dy = (clip.bottom() - 4.0 - rect.bottom()).min(0.0);
+    rect = rect.translate(vec2(dx, dy));
+    let top_center = top_center + vec2(dx, dy);
+    if placed.iter().any(|r| r.intersects(rect)) {
+        return;
+    }
+    placed.push(rect);
     p.rect_filled(rect, CornerRadius::same(6), Color32::from_black_alpha(150));
     p.galley(pos2(top_center.x, top_center.y), galley, Color32::WHITE);
 }

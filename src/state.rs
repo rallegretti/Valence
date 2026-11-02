@@ -1,17 +1,23 @@
 //! Shared resources.
 
+use std::collections::VecDeque;
+
 use bevy::prelude::*;
-use valence_chem::{AtomId, Lab, Namer, Names, Vec3 as CVec3};
+use valence_chem::{AtomId, Lab, MolGraph, Namer, Names, Reject, Vec3 as CVec3};
+
+use crate::crash::guard;
 
 /// Bevy and the chem crate both use glam 0.33, so these are the same type.
 const _: fn(CVec3) -> Vec3 = |v| v;
+
+const UNDO_LIMIT: usize = 64;
 
 pub struct Molecule {
     pub atoms: Vec<AtomId>,
     pub names: Names,
 }
 
-/// The chemistry world plus cached per-molecule names.
+/// The chemistry world plus cached per-molecule names and undo history.
 #[derive(Resource)]
 pub struct Chem {
     pub lab: Lab,
@@ -20,6 +26,8 @@ pub struct Chem {
     /// atom id → index into `molecules`.
     pub atom_mol: Vec<usize>,
     named_rev: u64,
+    undo: VecDeque<Lab>,
+    redo: Vec<Lab>,
 }
 
 impl Default for Chem {
@@ -30,11 +38,81 @@ impl Default for Chem {
             molecules: Vec::new(),
             atom_mol: Vec::new(),
             named_rev: u64::MAX,
+            undo: VecDeque::new(),
+            redo: Vec::new(),
         }
     }
 }
 
+/// Outcome of a guarded edit.
+pub enum Edit<T> {
+    Done(T),
+    Rejected(Reject),
+    /// A bug panicked; the lab was rolled back.
+    Crashed,
+}
+
 impl Chem {
+    /// Apply a structural edit transactionally: on success it becomes an undo
+    /// step; on rejection nothing changes; on a panic the lab is restored.
+    pub fn edit<T>(
+        &mut self,
+        what: &str,
+        f: impl FnOnce(&mut Lab) -> Result<T, Reject>,
+    ) -> Edit<T> {
+        let before = self.lab.clone();
+        match guard(what, || f(&mut self.lab)) {
+            Some(Ok(v)) => {
+                self.undo.push_back(before);
+                if self.undo.len() > UNDO_LIMIT {
+                    self.undo.pop_front();
+                }
+                self.redo.clear();
+                Edit::Done(v)
+            }
+            Some(Err(e)) => Edit::Rejected(e),
+            None => {
+                self.lab.restore(before);
+                Edit::Crashed
+            }
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(prev) = self.undo.pop_back() else {
+            return false;
+        };
+        let current = self.lab.clone();
+        self.lab.restore(prev);
+        self.redo.push(current);
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        let current = self.lab.clone();
+        self.lab.restore(next);
+        self.undo.push_back(current);
+        true
+    }
+
+    /// Run the layout physics; a panic here just stops the motion.
+    pub fn relax(&mut self, iterations: usize, pinned: Option<AtomId>) {
+        if guard("layout", || self.lab.relax(iterations, pinned)).is_none() {
+            self.lab.sleep();
+        }
+    }
+
     /// Re-derive molecules and names after a structural change. O(atoms), and
     /// only runs when the lab's revision moved.
     pub fn refresh(&mut self) {
@@ -45,9 +123,13 @@ impl Chem {
         self.molecules.clear();
         self.atom_mol = vec![usize::MAX; self.lab.atom_slots()];
         for atoms in self.lab.components() {
-            let names = self.namer.name(&self.lab.graph(&atoms));
+            let graph = self.lab.graph(&atoms);
+            let names = guard("naming", || self.namer.name(&graph))
+                .unwrap_or_else(|| fallback_names(&graph));
             for &a in &atoms {
-                self.atom_mol[a as usize] = self.molecules.len();
+                if let Some(slot) = self.atom_mol.get_mut(a as usize) {
+                    *slot = self.molecules.len();
+                }
             }
             self.molecules.push(Molecule { atoms, names });
         }
@@ -57,6 +139,16 @@ impl Chem {
         self.atom_mol
             .get(atom as usize)
             .and_then(|&i| self.molecules.get(i))
+    }
+}
+
+fn fallback_names(g: &MolGraph) -> Names {
+    Names {
+        title: "Unnamed compound".into(),
+        formula: guard("formula", || g.formula()).unwrap_or_default(),
+        open_sites: g.total_free(),
+        complete: g.is_complete(),
+        ..Default::default()
     }
 }
 
@@ -141,5 +233,74 @@ impl Effects {
         if self.0.len() > 12 {
             self.0.remove(0);
         }
+    }
+
+    /// Report the outcome of an edit at `at`.
+    pub fn report<T>(&mut self, edit: &Edit<T>, at: Vec3, ok_text: &str, now: f64) {
+        match edit {
+            Edit::Done(_) => self.push(at, ok_text, true, now),
+            Edit::Rejected(e) => self.push(at, e.0.clone(), false, now),
+            Edit::Crashed => self.push(
+                at,
+                "Something went wrong, so that change was undone.",
+                false,
+                now,
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edits_undo_and_redo() {
+        let mut chem = Chem::default();
+        let Edit::Done(o) = chem.edit("add", |lab| lab.add_atom(8, Vec3::ZERO)) else {
+            panic!("add failed")
+        };
+        assert!(matches!(
+            chem.edit("attach", |lab| lab.attach(o, 1, Vec3::X)),
+            Edit::Done(_)
+        ));
+        assert_eq!(chem.lab.atom_count(), 2);
+        // A rejected edit is not an undo step.
+        assert!(matches!(
+            chem.edit("bad", |lab| lab.attach(o, 10, Vec3::X)),
+            Edit::Rejected(_)
+        ));
+        assert!(chem.undo());
+        assert_eq!(chem.lab.atom_count(), 1);
+        assert!(chem.undo());
+        assert!(chem.lab.is_empty());
+        assert!(!chem.undo());
+        assert!(chem.redo() && chem.redo());
+        assert_eq!(chem.lab.atom_count(), 2);
+        chem.refresh();
+        assert_eq!(chem.molecules.len(), 1);
+        assert_eq!(chem.molecules[0].names.title, "Hydroxyl radical");
+    }
+
+    #[test]
+    fn a_panicking_edit_is_rolled_back() {
+        let mut chem = Chem::default();
+        let Edit::Done(c) = chem.edit("add", |lab| lab.add_atom(6, Vec3::ZERO)) else {
+            panic!("add failed")
+        };
+        let before = chem.lab.revision();
+        let r: Edit<()> = chem.edit("boom", |lab| {
+            let _ = lab.attach(c, 1, Vec3::X); // partially mutate...
+            panic!("simulated bug"); // ...then blow up
+        });
+        assert!(matches!(r, Edit::Crashed));
+        assert_eq!(chem.lab.atom_count(), 1, "partial edit must be rolled back");
+        assert!(chem.lab.revision() > before, "caches must see the restore");
+        chem.lab.validate().unwrap();
+        // The game carries on normally afterwards.
+        assert!(matches!(
+            chem.edit("attach", |lab| lab.attach(c, 1, Vec3::X)),
+            Edit::Done(_)
+        ));
     }
 }

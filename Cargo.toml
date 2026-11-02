@@ -7,11 +7,45 @@ name = "valence"
 version = "0.1.0"
 edition = "2024"
 description = "Drag-and-drop 3D molecule builder"
+rust-version = "1.95"
 
 [dependencies]
 valence_chem = { path = "crates/chem" }
-bevy = { version = "0.20.1" }
-bevy_egui = "0.43.1"
+# Only the Bevy features we use: no audio, gamepad (needs libudev on Linux),
+# glTF, scenes or bevy_ui. Fewer system deps = builds cleanly on every OS.
+bevy = { version = "0.20.1", default-features = false, features = [
+    "std",
+    "async_executor",
+    "multi_threaded",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_winit",
+    "bevy_window",
+    "x11",
+    "wayland",
+    "keyboard",
+    "mouse",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_post_process",
+    "bevy_anti_alias",
+    "bevy_camera",
+    "bevy_light",
+    "bevy_color",
+    "bevy_image",
+    "bevy_mesh",
+    "bevy_shader",
+    "bevy_material",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd_rust",
+    "png",
+] }
+bevy_egui = { version = "0.43.1", default-features = false, features = ["render", "default_fonts"] }
+# bevy_asset hashes with blake3; "pure" avoids its C/asm build step so no C
+# compiler is needed on any platform (and cross-checks work from Linux).
+blake3 = { version = "1.8", features = ["pure"] }
 
 # Fast iteration: optimize dependencies even in debug builds.
 [profile.dev]
@@ -22,3 +56,12 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Unwind (not abort) so the crash guard can catch a bug, roll the lab back
+# and keep the game running.
+panic = "unwind"
+
+# Shipping build: `cargo build --profile dist`
+[profile.dist]
+inherits = "release"
+lto = "fat"
+strip = "debuginfo"

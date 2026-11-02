@@ -224,7 +224,7 @@ fn binary(g: &MolGraph) -> Option<String> {
     if category(z1).is_metal() {
         let mut name = e1.name.to_lowercase();
         if e1.valences.len() > 1 && n1 == 1 {
-            let idx = g.z.iter().position(|&z| z == z1).unwrap();
+            let idx = g.z.iter().position(|&z| z == z1)?;
             let ox: u8 = g
                 .neighbors(idx)
                 .iter()
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn built_water_is_water() {
         let mut lab = Lab::new();
-        let o = lab.add_atom(8, Vec3::ZERO);
+        let o = lab.add_atom(8, Vec3::ZERO).unwrap();
         lab.attach(o, 1, Vec3::X).unwrap();
         let n = names_of(&lab, o);
         assert_eq!(n.title, "Hydroxyl radical");
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn ionic_names() {
         let mut lab = Lab::new();
-        let cl = lab.add_atom(17, Vec3::ZERO);
+        let cl = lab.add_atom(17, Vec3::ZERO).unwrap();
         lab.attach(cl, 11, Vec3::X).unwrap();
         let n = names_of(&lab, cl);
         assert_eq!(
@@ -303,7 +303,7 @@ mod tests {
             ("sodium chloride", "Table salt", "NaCl")
         );
 
-        let ca = lab.add_atom(20, Vec3::ZERO);
+        let ca = lab.add_atom(20, Vec3::ZERO).unwrap();
         for _ in 0..2 {
             let o = lab.attach(ca, 8, Vec3::X).unwrap();
             lab.attach(o, 1, Vec3::X).unwrap();
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(n.title, "Slaked lime");
 
         // Calcium carbonate: C + 3 O, then Ca bridging the two O radicals.
-        let c = lab.add_atom(6, Vec3::ZERO);
+        let c = lab.add_atom(6, Vec3::ZERO).unwrap();
         let os: Vec<_> = (0..3).map(|_| lab.attach(c, 8, Vec3::X).unwrap()).collect();
         let open: Vec<_> = os.iter().copied().filter(|&o| lab.free(o) > 0).collect();
         assert_eq!(open.len(), 2);
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(n.formula, "CaCO₃");
         assert!(n.complete);
 
-        let fe = lab.add_atom(26, Vec3::ZERO);
+        let fe = lab.add_atom(26, Vec3::ZERO).unwrap();
         for _ in 0..3 {
             lab.attach(fe, 17, Vec3::X).unwrap();
         }

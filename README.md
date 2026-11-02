@@ -9,8 +9,14 @@ shape, with its common and IUPAC names.
 ```
 cargo run --release            # play
 cargo run --release -- --demo  # start with a shelf of example molecules
-cargo test --workspace         # chemistry rules, naming and layout tests
+cargo test --workspace         # rules, naming, layout, stress and crash-rollback tests
+cargo build --profile dist     # optimised shipping build → target/dist/
 ```
+
+Runs on Windows, macOS (Apple Silicon and Intel) and Linux (X11 or Wayland).
+Requires Rust 1.95+. Linux builds also need `pkg-config libx11-dev
+libxkbcommon-dev libwayland-dev` (Debian/Ubuntu names); Windows and macOS need
+nothing beyond Rust. No C compiler is required on any platform.
 
 ## How to play
 
@@ -21,9 +27,13 @@ cargo test --workspace         # chemistry rules, naming and layout tests
 | Select an atom, then click elements | Builds onto the selected atom without dragging |
 | Drag an atom | Moves its molecule; drop it on another atom to bond the two |
 | Shift + drag an atom | Moves just that atom (use it to close rings, e.g. benzene) |
-| Right-drag / middle-drag / scroll | Orbit / pan / zoom |
-| Right-click or Delete on an atom | Removes it |
+| Drag empty space / Shift + drag empty space | Orbit / pan (works on trackpads) |
+| Right-drag / middle-drag | Orbit / pan |
+| Scroll or pinch | Zoom |
+| Right-click, Delete or Backspace on an atom | Removes it (Delete/Backspace also acts on the selected atom) |
+| Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z (or Ctrl + Y) | Undo / redo (also buttons in the panel) |
 | F | Frame everything |
+| Esc | Cancel a drag |
 
 **Visual language**
 
@@ -74,6 +84,53 @@ built), coordination complexes, and stereochemistry.
    ene/yne, and -ol (e.g. 3-ethyl-2-methylpentane, propan-2-ol,
    1,2-dichlorobenzene).
 
+## Stability ("no-crash" design)
+
+- **The core never panics.** `crates/chem` and the app deny `unwrap`, `expect`,
+  `panic!` and `unreachable!` outside tests (enforced by clippy). Every lookup
+  is checked, every search is bounded (the bond solver is polynomial, not
+  exponential), positions are protected from NaN/∞, and the lab is capped at
+  2000 atoms.
+- **Every edit is transactional.** Player actions go through `Chem::edit`,
+  which snapshots the lab and runs the change under `catch_unwind`. A
+  rejected action changes nothing. If an unknown bug panics, the lab rolls
+  back, the player sees "that change was undone", and the game keeps running.
+  Physics and naming are guarded the same way (naming falls back to the formula).
+- **Crash log.** Any panic is appended, with a backtrace, to
+  `%LOCALAPPDATA%\Valence\crash.log` (Windows),
+  `~/Library/Logs/Valence/crash.log` (macOS), or
+  `~/.local/state/valence/crash.log` (Linux).
+- **Bevy errors are warnings.** A failing system logs instead of quitting
+  (`set_error_handler(warn)`). Minimised or tiny windows get a safe viewport,
+  and the window has a minimum size.
+- **Tested hard.** `crates/chem/tests/stress.rs` runs 300,000 random player
+  actions (including garbage input such as invalid elements, dead atom ids
+  and NaN positions) and checks every invariant after each one. A dense fused
+  carbon sheet exercises the solver's worst case. Separate tests prove that a
+  panicking edit rolls back cleanly and that undo/redo works.
+- Release builds unwind on panic (so the guard can catch it). The Windows
+  release build is a GUI app with no console window.
+
+## Checking a platform locally
+
+All building and testing happens on your own machines; nothing uses hosted CI.
+
+- **macOS / Linux:** `scripts/check.sh`
+- **Windows (PowerShell):** `.\scripts\check.ps1`
+
+Each script runs format, clippy (warnings are errors), the full test suite and
+the `dist` build. It then launches the game, renders the demo scene, saves a
+screenshot and exits. A pass means the binary builds, starts, draws and shuts
+down cleanly on that machine.
+
+From Linux you can also compile-check the other platforms without their SDKs:
+
+```
+rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
+cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+cargo check --workspace --all-targets --target aarch64-apple-darwin
+```
+
 ## Architecture
 
 ```
@@ -85,7 +142,10 @@ src/          Bevy 0.20 front end
   interact.rs  ray picking, drag & drop, drop-feedback cache
   ui.rs        egui periodic table, info cards, 2D overlays (symbols, badges, tags)
   camera.rs    orbit camera confined to the right-hand viewport
-  debug.rs     --demo scene, VALENCE_SCREENSHOT / VALENCE_ZOOM / VALENCE_FAKE_DRAG
+  state.rs     Chem resource: transactional edits, undo/redo, cached names
+  crash.rs     panic hook → crash log, catch_unwind guard
+  debug.rs     --demo scene, VALENCE_SCREENSHOT / VALENCE_ZOOM / VALENCE_WINDOW / VALENCE_FAKE_DRAG
+scripts/      check.sh (macOS/Linux) and check.ps1 (Windows) local verification
 ```
 
 Performance notes:
@@ -96,5 +156,8 @@ Performance notes:
 - Names and molecules are recomputed only when the lab's revision changes;
   drop checks are cached per (target, element, revision).
 - Meshes and materials are shared; one material per element.
+- Only the Bevy features in use are compiled (no audio, gamepad, glTF, scenes
+  or bevy_ui), which means fewer system dependencies and faster builds.
+- Full frame rate while focused, throttled to about 10 fps in the background.
 
 Fonts: DejaVu Sans (see `assets/fonts/LICENSE-DejaVu.txt`).

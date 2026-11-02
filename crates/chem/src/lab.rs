@@ -12,6 +12,12 @@
 //!   bonds; the bond "order" is the number of electrons transferred, which
 //!   gives the ion charges (Mg²⁺ O²⁻).
 //! - H onto a full N/O/P/S lone pair makes an "-onium" cation (NH₄⁺, H₃O⁺).
+//!
+//! Robustness: no operation here panics on any input. Every public mutation
+//! either succeeds or returns a `Reject` and leaves the lab unchanged, and
+//! all searches are polynomial and bounded.
+
+use std::collections::VecDeque;
 
 use glam::Vec3;
 
@@ -20,6 +26,10 @@ use crate::graph::{BondKind, MolGraph};
 
 pub type AtomId = u32;
 pub type BondId = u32;
+
+/// Hard cap on atoms in the lab, so a runaway session can't exhaust
+/// memory or make the frame time collapse.
+pub const MAX_ATOMS: usize = 2000;
 
 #[derive(Clone, Debug)]
 pub struct Atom {
@@ -62,6 +72,10 @@ impl std::fmt::Display for Reject {
     }
 }
 
+fn reject<T>(msg: impl Into<String>) -> Result<T, Reject> {
+    Err(Reject(msg.into()))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachMode {
     /// Target has an open site (possibly after the solver lowers a multiple bond).
@@ -78,6 +92,15 @@ pub struct AttachPlan {
     pub mode: AttachMode,
     /// Short description for the UI ("Covalent bond", "Ionic: Na gives 1 e⁻ to Cl", ...).
     pub note: String,
+}
+
+/// How each side of a new bond gets room: `None` = already has room,
+/// `Some(v)` = expand to valence `v`.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectPlan {
+    pub kind: BondKind,
+    pub expand_a: Option<u8>,
+    pub expand_b: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -100,7 +123,7 @@ pub fn pair_kind(za: u8, zb: u8) -> Result<BondKind, Reject> {
     for z in [za, zb] {
         let e = element(z);
         if e.valences.is_empty() {
-            return Err(Reject(if category(z) == Category::NobleGas {
+            return reject(if category(z) == Category::NobleGas {
                 format!(
                     "{} is a noble gas: its electron shell is already full, so it doesn't bond.",
                     e.name
@@ -110,7 +133,7 @@ pub fn pair_kind(za: u8, zb: u8) -> Result<BondKind, Reject> {
                     "{} is a synthetic superheavy element. It decays within seconds, far too fast to form compounds.",
                     e.name
                 )
-            }));
+            });
         }
     }
     // Heavy noble gases only react with the most electronegative partners.
@@ -126,17 +149,17 @@ pub fn pair_kind(za: u8, zb: u8) -> Result<BondKind, Reject> {
             } else {
                 "fluorine or oxygen"
             };
-            return Err(Reject(format!(
+            return reject(format!(
                 "{} only forms compounds with {partners}.",
                 element(n).name
-            )));
+            ));
         }
     }
     let (ma, mb) = (category(za).is_metal(), category(zb).is_metal());
     match (ma, mb) {
-        (true, true) => Err(Reject(
-            "Two metals don't form a molecule: they'd share a sea of electrons as a metallic alloy instead.".into(),
-        )),
+        (true, true) => reject(
+            "Two metals don't form a molecule: they'd share a sea of electrons as a metallic alloy instead.",
+        ),
         (false, false) => Ok(BondKind::Covalent),
         _ => {
             let (m, n) = if ma { (za, zb) } else { (zb, za) };
@@ -159,7 +182,7 @@ pub fn bond_length(za: u8, zb: u8, order: u8, kind: BondKind) -> f32 {
     match kind {
         BondKind::Ionic => base * 1.08,
         BondKind::Covalent => match order {
-            1 => base,
+            0 | 1 => base,
             2 => base * 0.88,
             _ => base * 0.8,
         },
@@ -173,6 +196,23 @@ pub fn atom_radius(z: u8) -> f32 {
 
 fn smallest_valence_at_least(z: u8, need: u8) -> Option<u8> {
     element(z).valences.iter().copied().find(|&v| v >= need)
+}
+
+fn next_valence(z: u8, current: u8) -> Option<u8> {
+    element(z).valences.iter().copied().find(|&v| v > current)
+}
+
+/// Is `z` the electron-accepting (anion) side of an ionic bond?
+fn is_anion_side(kind: BondKind, z: u8) -> bool {
+    kind == BondKind::Ionic && !category(z).is_metal()
+}
+
+fn valid_z(z: u8) -> Result<(), Reject> {
+    if (1..=118).contains(&z) {
+        Ok(())
+    } else {
+        reject("Unknown element.")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +239,10 @@ impl Lab {
 
     pub fn bond(&self, id: BondId) -> Option<&Bond> {
         self.bonds.get(id as usize).and_then(|b| b.as_ref())
+    }
+
+    fn bond_mut(&mut self, id: BondId) -> Option<&mut Bond> {
+        self.bonds.get_mut(id as usize).and_then(|b| b.as_mut())
     }
 
     pub fn atoms(&self) -> impl Iterator<Item = (AtomId, &Atom)> {
@@ -228,6 +272,10 @@ impl Lab {
         self.atom_count() == 0
     }
 
+    pub fn is_full(&self) -> bool {
+        self.atom_count() >= MAX_ATOMS
+    }
+
     pub fn clear(&mut self) {
         *self = Lab {
             revision: self.revision + 1,
@@ -235,7 +283,23 @@ impl Lab {
         };
     }
 
+    /// Replace the contents with a snapshot (undo/redo/rollback). The
+    /// revision keeps increasing, so anything cached per revision refreshes.
+    pub fn restore(&mut self, mut snapshot: Lab) {
+        snapshot.revision = self.revision.max(snapshot.revision) + 1;
+        snapshot.awake = 240;
+        *self = snapshot;
+    }
+
+    /// Stop the layout until the next change.
+    pub fn sleep(&mut self) {
+        self.awake = 0;
+    }
+
     pub fn set_pos(&mut self, id: AtomId, pos: Vec3) {
+        if !pos.is_finite() {
+            return;
+        }
         if let Some(a) = self.atom_mut(id) {
             a.pos = pos;
         }
@@ -244,6 +308,9 @@ impl Lab {
 
     /// Move a set of atoms rigidly (dragging a whole molecule).
     pub fn translate(&mut self, ids: &[AtomId], delta: Vec3) {
+        if !delta.is_finite() {
+            return;
+        }
         for &id in ids {
             if let Some(a) = self.atom_mut(id) {
                 a.pos += delta;
@@ -265,16 +332,19 @@ impl Lab {
 
     /// Number of bonds (σ count), regardless of order.
     pub fn sigma(&self, id: AtomId) -> u8 {
-        self.atom(id).map_or(0, |a| a.bonds.len() as u8)
+        self.atom(id)
+            .map_or(0, |a| a.bonds.len().min(u8::MAX as usize) as u8)
     }
 
     /// Bonding electrons in use (sum of bond orders).
     pub fn used(&self, id: AtomId) -> u8 {
-        self.neighbors(id).map(|(_, b)| b.order).sum()
+        self.neighbors(id)
+            .fold(0u8, |acc, (_, b)| acc.saturating_add(b.order))
     }
 
     pub fn capacity(&self, id: AtomId) -> u8 {
-        self.atom(id).map_or(0, |a| a.valence + a.protonated as u8)
+        self.atom(id)
+            .map_or(0, |a| a.valence.saturating_add(a.protonated as u8))
     }
 
     /// Open bonding sites (unpaired electrons).
@@ -287,10 +357,11 @@ impl Lab {
         let mut q = a.protonated as i8;
         for (_, b) in self.neighbors(id) {
             if b.kind == BondKind::Ionic {
-                q += if b.a == id {
-                    b.order as i8
+                let o = b.order.min(i8::MAX as u8) as i8;
+                q = if b.a == id {
+                    q.saturating_add(o)
                 } else {
-                    -(b.order as i8)
+                    q.saturating_sub(o)
                 };
             }
         }
@@ -300,8 +371,7 @@ impl Lab {
     pub fn covalent_used(&self, id: AtomId) -> u8 {
         self.neighbors(id)
             .filter(|(_, b)| b.kind == BondKind::Covalent)
-            .map(|(_, b)| b.order)
-            .sum()
+            .fold(0u8, |acc, (_, b)| acc.saturating_add(b.order))
     }
 
     pub fn lone_pairs(&self, id: AtomId) -> u8 {
@@ -311,7 +381,7 @@ impl Lab {
             return 0;
         }
         let nonbonding = v - self.covalent_used(id) as i32 - self.charge(id) as i32;
-        ((nonbonding - self.free(id) as i32) / 2).max(0) as u8
+        ((nonbonding - self.free(id) as i32) / 2).clamp(0, 8) as u8
     }
 
     pub fn has_ionic(&self, id: AtomId) -> bool {
@@ -322,18 +392,28 @@ impl Lab {
     // Components & graphs
     // -----------------------------------------------------------------------
 
-    /// Atoms connected to `start`, sorted ascending.
+    /// Atoms connected to `start`, sorted ascending (empty if `start` is gone).
     pub fn component(&self, start: AtomId) -> Vec<AtomId> {
-        let mut out = vec![start];
+        if self.atom(start).is_none() {
+            return Vec::new();
+        }
         let mut seen = vec![false; self.atoms.len()];
-        seen[start as usize] = true;
+        self.component_with(start, &mut seen)
+    }
+
+    fn component_with(&self, start: AtomId, seen: &mut [bool]) -> Vec<AtomId> {
+        let mut out = vec![start];
+        if let Some(s) = seen.get_mut(start as usize) {
+            *s = true;
+        }
         let mut i = 0;
-        while i < out.len() {
-            let u = out[i];
+        while let Some(&u) = out.get(i) {
             i += 1;
             for (v, _) in self.neighbors(u) {
-                if !seen[v as usize] {
-                    seen[v as usize] = true;
+                if let Some(s) = seen.get_mut(v as usize)
+                    && !*s
+                {
+                    *s = true;
                     out.push(v);
                 }
             }
@@ -347,12 +427,8 @@ impl Lab {
         let mut seen = vec![false; self.atoms.len()];
         let mut out = Vec::new();
         for (id, _) in self.atoms() {
-            if !seen[id as usize] {
-                let c = self.component(id);
-                for &a in &c {
-                    seen[a as usize] = true;
-                }
-                out.push(c);
+            if !seen.get(id as usize).copied().unwrap_or(true) {
+                out.push(self.component_with(id, &mut seen));
             }
         }
         out
@@ -363,8 +439,9 @@ impl Lab {
         let mut g = MolGraph::default();
         let mut map = std::collections::HashMap::with_capacity(atoms.len());
         for &a in atoms {
-            let at = self.atom(a).expect("live atom");
-            map.insert(a, g.add_atom(at.z, self.charge(a), self.free(a)));
+            if let Some(at) = self.atom(a) {
+                map.insert(a, g.add_atom(at.z, self.charge(a), self.free(a)));
+            }
         }
         for (_, b) in self.bonds() {
             if let (Some(&ia), Some(&ib)) = (map.get(&b.a), map.get(&b.b)) {
@@ -374,25 +451,79 @@ impl Lab {
         g
     }
 
+    /// Check internal invariants. Used by tests and debug builds; returns a
+    /// description of the first problem found.
+    pub fn validate(&self) -> Result<(), String> {
+        for (bid, b) in self.bonds() {
+            for end in [b.a, b.b] {
+                let Some(a) = self.atom(end) else {
+                    return Err(format!("bond {bid} points at dead atom {end}"));
+                };
+                if !a.bonds.contains(&bid) {
+                    return Err(format!("atom {end} doesn't list bond {bid}"));
+                }
+            }
+            if b.a == b.b {
+                return Err(format!("bond {bid} is a self-loop"));
+            }
+            if !(1..=3).contains(&b.order) {
+                return Err(format!("bond {bid} has order {}", b.order));
+            }
+        }
+        for (id, a) in self.atoms() {
+            for &bid in &a.bonds {
+                match self.bond(bid) {
+                    Some(b) if b.a == id || b.b == id => {}
+                    _ => return Err(format!("atom {id} lists foreign/dead bond {bid}")),
+                }
+            }
+            let mut nbrs: Vec<AtomId> = self.neighbors(id).map(|(n, _)| n).collect();
+            nbrs.sort_unstable();
+            if nbrs.windows(2).any(|w| w[0] == w[1]) {
+                return Err(format!("atom {id} has a duplicate bond"));
+            }
+            if self.used(id) > self.capacity(id) {
+                return Err(format!(
+                    "atom {id} over capacity: {} > {}",
+                    self.used(id),
+                    self.capacity(id)
+                ));
+            }
+            if !a.pos.is_finite() {
+                return Err(format!("atom {id} has a non-finite position"));
+            }
+            if a.domains.len() != (self.free(id) + self.lone_pairs(id)) as usize {
+                return Err(format!(
+                    "atom {id} has {} domains, expected {}",
+                    a.domains.len(),
+                    self.free(id) + self.lone_pairs(id)
+                ));
+            }
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Mutations
     // -----------------------------------------------------------------------
 
     fn alloc_atom(&mut self, atom: Atom) -> AtomId {
-        if let Some(id) = self.free_atom_slots.pop() {
-            self.atoms[id as usize] = Some(atom);
-            id
-        } else {
-            self.atoms.push(Some(atom));
-            (self.atoms.len() - 1) as AtomId
+        if let Some(id) = self.free_atom_slots.pop()
+            && let Some(slot) = self.atoms.get_mut(id as usize)
+        {
+            *slot = Some(atom);
+            return id;
         }
+        self.atoms.push(Some(atom));
+        (self.atoms.len() - 1) as AtomId
     }
 
-    fn alloc_bond(&mut self, a: AtomId, b: AtomId, kind: BondKind) -> BondId {
+    /// Both atoms must exist (callers check first).
+    fn alloc_bond(&mut self, a: AtomId, b: AtomId, kind: BondKind) -> Option<BondId> {
+        let za = self.atom(a)?.z;
+        self.atom(b)?;
         // Ionic bonds store the cation first.
-        let (a, b) = if kind == BondKind::Ionic
-            && !category(self.atoms[a as usize].as_ref().unwrap().z).is_metal()
-        {
+        let (a, b) = if kind == BondKind::Ionic && !category(za).is_metal() {
             (b, a)
         } else {
             (a, b)
@@ -403,21 +534,30 @@ impl Lab {
             order: 1,
             kind,
         };
-        let id = if let Some(id) = self.free_bond_slots.pop() {
-            self.bonds[id as usize] = Some(bond);
-            id
-        } else {
-            self.bonds.push(Some(bond));
-            (self.bonds.len() - 1) as BondId
+        let id = match self.free_bond_slots.pop() {
+            Some(id) if (id as usize) < self.bonds.len() => {
+                self.bonds[id as usize] = Some(bond);
+                id
+            }
+            _ => {
+                self.bonds.push(Some(bond));
+                (self.bonds.len() - 1) as BondId
+            }
         };
-        self.atom_mut(a).unwrap().bonds.push(id);
-        self.atom_mut(b).unwrap().bonds.push(id);
-        id
+        self.atom_mut(a)?.bonds.push(id);
+        self.atom_mut(b)?.bonds.push(id);
+        Some(id)
     }
 
-    /// Drop a lone atom into the play space. Always succeeds (noble gases are
-    /// happy on their own).
-    pub fn add_atom(&mut self, z: u8, pos: Vec3) -> AtomId {
+    /// Drop a lone atom into the play space.
+    pub fn add_atom(&mut self, z: u8, pos: Vec3) -> Result<AtomId, Reject> {
+        valid_z(z)?;
+        if self.is_full() {
+            return reject(format!(
+                "The lab is full ({MAX_ATOMS} atoms). Remove something first."
+            ));
+        }
+        let pos = if pos.is_finite() { pos } else { Vec3::ZERO };
         let valence = element(z).valences.first().copied().unwrap_or(0);
         let id = self.alloc_atom(Atom {
             z,
@@ -429,7 +569,7 @@ impl Lab {
             vel: Vec3::ZERO,
         });
         self.after_change(&[id]);
-        id
+        Ok(id)
     }
 
     pub fn remove_atom(&mut self, id: AtomId) {
@@ -438,58 +578,64 @@ impl Lab {
         };
         let mut touched = Vec::new();
         for &bid in &atom.bonds {
-            let bond = self.bonds[bid as usize].take().unwrap();
+            let Some(bond) = self.bonds.get_mut(bid as usize).and_then(Option::take) else {
+                continue;
+            };
             self.free_bond_slots.push(bid);
             let other = bond.other(id);
             touched.push(other);
-            // Shrink the neighbour back to the smallest valence that still
-            // covers what it keeps (SO₃ minus an O → SO₂, NH₄⁺ minus H → NH₃).
-            // `used` still counts the bond being removed (it's looked up by
-            // id and we've only taken it out of the bond table), so subtract.
-            let remaining = self
-                .atom(other)
-                .unwrap()
-                .bonds
-                .iter()
-                .filter(|&&b| b != bid)
-                .filter_map(|&b| self.bond(b))
-                .map(|b| b.order)
-                .sum::<u8>();
-            let o = self.atom_mut(other).unwrap();
+            // What the neighbour keeps after losing this bond (the bond is
+            // already out of the table, so `used` no longer counts it).
+            let remaining = self.used(other);
+            let Some(o) = self.atom_mut(other) else {
+                continue;
+            };
             o.bonds.retain(|&b| b != bid);
+            // Shrink back to the smallest valence that still covers what it
+            // keeps (SO₃ minus an O → SO₂, NH₄⁺ minus H → NH₃).
             if o.protonated && remaining <= o.valence {
                 o.protonated = false;
             }
             let p = o.protonated as u8;
-            let sigma = o.bonds.len() as u8;
+            let sigma = o.bonds.len().min(u8::MAX as usize) as u8;
             let need = remaining.saturating_sub(p).max(sigma.saturating_sub(p));
             if let Some(v) = smallest_valence_at_least(o.z, need) {
                 o.valence = o.valence.min(v);
             }
         }
-        self.atoms[id as usize] = None;
-        self.free_atom_slots.push(id);
+        if let Some(slot) = self.atoms.get_mut(id as usize) {
+            *slot = None;
+            self.free_atom_slots.push(id);
+        }
         self.after_change(&touched);
     }
 
     /// Can element `z` be attached to atom `target`? Cheap enough to call on hover.
     pub fn check_attach(&self, target: AtomId, z: u8) -> Result<AttachPlan, Reject> {
-        let t = self
-            .atom(target)
-            .ok_or_else(|| Reject("That atom no longer exists.".into()))?;
+        valid_z(z)?;
+        let Some(t) = self.atom(target) else {
+            return reject("That atom no longer exists.");
+        };
+        if self.is_full() {
+            return reject(format!(
+                "The lab is full ({MAX_ATOMS} atoms). Remove something first."
+            ));
+        }
         let kind = pair_kind(t.z, z)?;
         let tname = element(t.z).name;
-        smallest_valence_at_least(z, 1)
-            .ok_or_else(|| Reject(format!("{} can't form a bond here.", element(z).name)))?;
+        if smallest_valence_at_least(z, 1).is_none() {
+            return reject(format!("{} can't form a bond here.", element(z).name));
+        }
 
-        if kind == BondKind::Ionic && !category(t.z).is_metal() {
+        let anion_target = is_anion_side(kind, t.z);
+        if anion_target {
             // Target is the anion side: it can only take electrons into its
             // base valence (Cl⁻, O²⁻), never by expanding.
             let base = smallest_valence_at_least(t.z, 1).unwrap_or(0);
-            if t.protonated || self.sigma(target) + 1 > base {
-                return Err(Reject(format!(
+            if t.protonated || self.sigma(target).saturating_add(1) > base {
+                return reject(format!(
                     "{tname} can't accept another electron here: it already has a full octet."
-                )));
+                ));
             }
         }
 
@@ -507,15 +653,20 @@ impl Lab {
         {
             candidates.push(AttachMode::Protonate);
         }
-        if let Some(&next) = element(t.z).valences.iter().find(|&&v| v > t.valence)
-            && self.sigma(target) < next + t.protonated as u8
-            && !(kind == BondKind::Ionic && !category(t.z).is_metal())
+        if !anion_target
+            && let Some(next) = next_valence(t.z, t.valence)
+            && self.sigma(target) < next.saturating_add(t.protonated as u8)
         {
             candidates.push(AttachMode::Expand(next));
         }
         if candidates.is_empty() {
-            let max = element(t.z).valences.last().copied().unwrap_or(0) + t.protonated as u8;
-            return Err(Reject(if category(t.z).is_metal() {
+            let max = element(t.z)
+                .valences
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(t.protonated as u8);
+            return reject(if category(t.z).is_metal() {
                 format!("{tname} has no more electrons to give (max {max}).")
             } else {
                 format!(
@@ -523,29 +674,29 @@ impl Lab {
                     self.sigma(target),
                     if max == 1 { "" } else { "s" }
                 )
-            }));
+            });
         }
 
         // Pick the option that leaves the fewest open sites; ties favour the
         // earlier (simpler) option.
-        let mode = if candidates.len() == 1 {
-            candidates[0]
-        } else {
-            let mut best = (u32::MAX, candidates[0]);
+        let mut mode = candidates[0];
+        if candidates.len() > 1 {
+            let mut best = u32::MAX;
             for &m in &candidates {
                 let mut trial = self.clone();
-                let id = trial.apply_attach(target, z, m, kind, Vec3::ZERO);
-                let open: u32 = trial
-                    .component(id)
-                    .iter()
-                    .map(|&a| trial.free(a) as u32)
-                    .sum();
-                if open < best.0 {
-                    best = (open, m);
+                if let Some(id) = trial.apply_attach(target, z, m, kind, Vec3::ZERO) {
+                    let open: u32 = trial
+                        .component(id)
+                        .iter()
+                        .map(|&a| trial.free(a) as u32)
+                        .sum();
+                    if open < best {
+                        best = open;
+                        mode = m;
+                    }
                 }
             }
-            best.1
-        };
+        }
 
         let (n_new, n_t) = (element(z).symbol, element(t.z).symbol);
         let note = match (kind, mode) {
@@ -577,7 +728,8 @@ impl Lab {
     /// direction used to pick which open site to use.
     pub fn attach(&mut self, target: AtomId, z: u8, hint: Vec3) -> Result<AtomId, Reject> {
         let plan = self.check_attach(target, z)?;
-        Ok(self.apply_attach(target, z, plan.mode, plan.kind, hint))
+        self.apply_attach(target, z, plan.mode, plan.kind, hint)
+            .ok_or_else(|| Reject("Couldn't place the new atom.".into()))
     }
 
     fn apply_attach(
@@ -587,131 +739,137 @@ impl Lab {
         mode: AttachMode,
         kind: BondKind,
         hint: Vec3,
-    ) -> AtomId {
-        let t = self.atom(target).unwrap().clone();
+    ) -> Option<AtomId> {
+        let valence = smallest_valence_at_least(z, 1)?;
+        let tz = self.atom(target)?.z;
+        let (dir, used_domain) = self.placement_dir(target, hint);
+        let t = self.atom_mut(target)?;
         match mode {
             AttachMode::Direct => {}
-            AttachMode::Expand(v) => self.atom_mut(target).unwrap().valence = v,
-            AttachMode::Protonate => self.atom_mut(target).unwrap().protonated = true,
+            AttachMode::Expand(v) => t.valence = v,
+            AttachMode::Protonate => t.protonated = true,
         }
-        let (dir, used_domain) = self.placement_dir(target, hint);
-        if let Some(i) = used_domain {
-            self.atom_mut(target).unwrap().domains.remove(i);
+        if let Some(i) = used_domain
+            && i < t.domains.len()
+        {
+            t.domains.remove(i);
         }
-        let len = bond_length(t.z, z, 1, kind);
-        let valence = smallest_valence_at_least(z, 1).unwrap();
+        let pos = t.pos + dir * bond_length(tz, z, 1, kind);
         let id = self.alloc_atom(Atom {
             z,
-            pos: t.pos + dir * len,
+            pos,
             valence,
             protonated: false,
             bonds: Vec::new(),
             domains: Vec::new(),
             vel: Vec3::ZERO,
         });
-        self.alloc_bond(target, id, kind);
+        self.alloc_bond(target, id, kind)?;
         self.after_change(&[target, id]);
-        id
+        Some(id)
     }
 
     /// Can two existing atoms be bonded (joining molecules or closing a ring)?
-    pub fn check_connect(
-        &self,
-        a: AtomId,
-        b: AtomId,
-    ) -> Result<(BondKind, Option<u8>, Option<u8>), Reject> {
+    pub fn check_connect(&self, a: AtomId, b: AtomId) -> Result<ConnectPlan, Reject> {
         if a == b {
-            return Err(Reject("An atom can't bond to itself.".into()));
+            return reject("An atom can't bond to itself.");
         }
-        let (aa, ab) = match (self.atom(a), self.atom(b)) {
-            (Some(x), Some(y)) => (x, y),
-            _ => return Err(Reject("That atom no longer exists.".into())),
+        let (Some(aa), Some(ab)) = (self.atom(a), self.atom(b)) else {
+            return reject("That atom no longer exists.");
         };
         if self.bonded(a, b) {
-            return Err(Reject("These atoms are already bonded.".into()));
+            return reject("These atoms are already bonded.");
         }
         let kind = pair_kind(aa.z, ab.z)?;
-        let options = |id: AtomId, at: &Atom, anion: bool| -> Vec<Option<u8>> {
+        for (id, at) in [(a, aa), (b, ab)] {
+            if is_anion_side(kind, at.z)
+                && (at.protonated
+                    || self.sigma(id).saturating_add(1)
+                        > smallest_valence_at_least(at.z, 1).unwrap_or(0))
+            {
+                return reject(format!(
+                    "{} can't accept another electron: its octet is full.",
+                    element(at.z).name
+                ));
+            }
+        }
+        let options = |id: AtomId, at: &Atom| -> Vec<Option<u8>> {
             let mut v = Vec::new();
             if self.sigma(id) < self.capacity(id) {
                 v.push(None);
             }
-            if !anion && let Some(&next) = element(at.z).valences.iter().find(|&&x| x > at.valence)
+            if !is_anion_side(kind, at.z)
+                && let Some(next) = next_valence(at.z, at.valence)
             {
                 v.push(Some(next));
             }
             v
         };
-        let anion = |at: &Atom| kind == BondKind::Ionic && !category(at.z).is_metal();
-        for (id, at) in [(a, aa), (b, ab)] {
-            if anion(at)
-                && (at.protonated
-                    || self.sigma(id) + 1 > smallest_valence_at_least(at.z, 1).unwrap_or(0))
-            {
-                return Err(Reject(format!(
-                    "{} can't accept another electron: its octet is full.",
-                    element(at.z).name
-                )));
-            }
-        }
-        let (oa, ob) = (options(a, aa, anion(aa)), options(b, ab, anion(ab)));
+        let (oa, ob) = (options(a, aa), options(b, ab));
         if oa.is_empty() || ob.is_empty() {
             let full = if oa.is_empty() { aa } else { ab };
-            return Err(Reject(format!(
+            return reject(format!(
                 "{} has no open bonding sites left.",
                 element(full.z).name
-            )));
+            ));
         }
-        let mut best: Option<(u32, Option<u8>, Option<u8>)> = None;
-        for &xa in &oa {
-            for &xb in &ob {
+        let mut best: Option<(u32, ConnectPlan)> = None;
+        for &expand_a in &oa {
+            for &expand_b in &ob {
+                let plan = ConnectPlan {
+                    kind,
+                    expand_a,
+                    expand_b,
+                };
                 let mut trial = self.clone();
-                trial.apply_connect(a, b, kind, xa, xb);
+                if trial.apply_connect(a, b, plan).is_none() {
+                    continue;
+                }
                 let open: u32 = trial
                     .component(a)
                     .iter()
                     .map(|&i| trial.free(i) as u32)
                     .sum();
-                if best.is_none_or(|(o, _, _)| open < o) {
-                    best = Some((open, xa, xb));
+                if best.as_ref().is_none_or(|(o, _)| open < *o) {
+                    best = Some((open, plan));
                 }
             }
         }
-        let (_, xa, xb) = best.unwrap();
-        Ok((kind, xa, xb))
+        best.map(|(_, p)| p)
+            .ok_or_else(|| Reject("These atoms can't bond here.".into()))
     }
 
     pub fn connect(&mut self, a: AtomId, b: AtomId) -> Result<(), Reject> {
-        let (kind, xa, xb) = self.check_connect(a, b)?;
-        self.apply_connect(a, b, kind, xa, xb);
-        Ok(())
+        let plan = self.check_connect(a, b)?;
+        self.apply_connect(a, b, plan)
+            .ok_or_else(|| Reject("These atoms can't bond here.".into()))
     }
 
-    fn apply_connect(
-        &mut self,
-        a: AtomId,
-        b: AtomId,
-        kind: BondKind,
-        xa: Option<u8>,
-        xb: Option<u8>,
-    ) {
-        if let Some(v) = xa {
-            self.atom_mut(a).unwrap().valence = v;
+    fn apply_connect(&mut self, a: AtomId, b: AtomId, plan: ConnectPlan) -> Option<()> {
+        if let Some(v) = plan.expand_a {
+            self.atom_mut(a)?.valence = v;
         }
-        if let Some(v) = xb {
-            self.atom_mut(b).unwrap().valence = v;
+        if let Some(v) = plan.expand_b {
+            self.atom_mut(b)?.valence = v;
         }
-        self.alloc_bond(a, b, kind);
+        self.alloc_bond(a, b, plan.kind)?;
         self.after_change(&[a, b]);
+        Some(())
     }
 
     /// Direction for a new neighbour: the open site closest to `hint`, else
-    /// the emptiest direction around the atom.
-    /// Returns the direction and, if one was used, the index of the consumed domain.
+    /// the emptiest direction around the atom. Also returns the index of the
+    /// consumed domain, if one was used.
     fn placement_dir(&self, id: AtomId, hint: Vec3) -> (Vec3, Option<usize>) {
-        let a = self.atom(id).unwrap();
+        let Some(a) = self.atom(id) else {
+            return (Vec3::Y, None);
+        };
         let free = self.free(id) as usize;
-        let hint = hint.normalize_or_zero();
+        let hint = if hint.is_finite() {
+            hint.normalize_or_zero()
+        } else {
+            Vec3::ZERO
+        };
         let mut best: Option<(f32, usize)> = None;
         for (i, &d) in a
             .domains
@@ -724,8 +882,12 @@ impl Lab {
                 best = Some((score, i));
             }
         }
-        if let Some((_, i)) = best {
-            return (a.domains[i], Some(i));
+        if let Some((_, i)) = best
+            && let Some(&d) = a.domains.get(i)
+            && d.is_finite()
+            && d != Vec3::ZERO
+        {
+            return (d.normalize_or(Vec3::Y), Some(i));
         }
         let sum: Vec3 = self
             .neighbors(id)
@@ -734,7 +896,7 @@ impl Lab {
             .sum();
         let away = -sum;
         let d = if away.length_squared() > 1e-4 {
-            away.normalize()
+            away.normalize_or(Vec3::Y)
         } else if hint != Vec3::ZERO {
             hint
         } else {
@@ -760,6 +922,11 @@ impl Lab {
         }
         self.revision += 1;
         self.wake();
+        debug_assert!(
+            self.validate().is_ok(),
+            "lab invariant broken: {:?}",
+            self.validate()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -768,27 +935,29 @@ impl Lab {
 
     /// Reset orders to 1, then raise them to fill as many open sites as
     /// possible: greedy round-robin, then augmenting alternating paths.
+    /// Runs in O(F·(V+E)) where F is the number of open sites.
     pub(crate) fn solve(&mut self, comp: &[AtomId]) {
-        let mut bond_ids: Vec<BondId> = Vec::new();
-        for &a in comp {
-            for &b in &self.atom(a).unwrap().bonds {
-                if !bond_ids.contains(&b) {
-                    bond_ids.push(b);
-                }
+        let mut bond_ids: Vec<BondId> = comp
+            .iter()
+            .filter_map(|&a| self.atom(a))
+            .flat_map(|a| a.bonds.iter().copied())
+            .collect();
+        bond_ids.sort_unstable();
+        bond_ids.dedup();
+        for &b in &bond_ids {
+            if let Some(bd) = self.bond_mut(b) {
+                bd.order = 1;
             }
         }
-        bond_ids.sort_unstable();
-        for &b in &bond_ids {
-            self.bonds[b as usize].as_mut().unwrap().order = 1;
-        }
-        // Safety: capacity must cover σ bonds.
+        // Capacity must cover σ bonds (expand if somehow short).
         for &a in comp {
             let sigma = self.sigma(a);
-            if self.capacity(a) < sigma {
-                let at = self.atom(a).unwrap();
-                let need = sigma - at.protonated as u8;
+            if self.capacity(a) < sigma
+                && let Some(at) = self.atom_mut(a)
+            {
+                let need = sigma.saturating_sub(at.protonated as u8);
                 if let Some(v) = smallest_valence_at_least(at.z, need) {
-                    self.atom_mut(a).unwrap().valence = v;
+                    at.valence = v;
                 }
             }
         }
@@ -796,10 +965,14 @@ impl Lab {
         loop {
             let mut changed = false;
             for &b in &bond_ids {
-                let bd = self.bonds[b as usize].as_ref().unwrap();
+                let Some(bd) = self.bond(b) else { continue };
                 let (x, y, o) = (bd.a, bd.b, bd.order);
-                if o < 3 && self.free(x) > 0 && self.free(y) > 0 {
-                    self.bonds[b as usize].as_mut().unwrap().order += 1;
+                if o < 3
+                    && self.free(x) > 0
+                    && self.free(y) > 0
+                    && let Some(bd) = self.bond_mut(b)
+                {
+                    bd.order += 1;
                     changed = true;
                 }
             }
@@ -807,70 +980,119 @@ impl Lab {
                 break;
             }
         }
-        // Augmenting paths: free(s) -inc- x -dec- y -inc- ... -inc- free(t).
-        while self.augment(comp) {}
+        // Each augmentation fills two open sites, so this is bounded.
+        let max_rounds = comp.iter().map(|&a| self.free(a) as usize).sum::<usize>() / 2 + 1;
+        for _ in 0..max_rounds {
+            if !self.augment(comp) {
+                break;
+            }
+        }
     }
 
+    /// One augmenting path: open(s) -inc- x -dec- y -inc- ... -inc- open(t).
+    /// Breadth-first over (atom, parity) states, so it's polynomial.
     fn augment(&mut self, comp: &[AtomId]) -> bool {
+        let Some(&max_id) = comp.iter().max() else {
+            return false;
+        };
+        let n = max_id as usize + 1;
         for &s in comp {
             if self.free(s) == 0 {
                 continue;
             }
-            let mut path: Vec<BondId> = Vec::new();
-            if self.dfs_augment(s, s, true, &mut path, comp.len() * 2 + 2) {
-                for (i, &b) in path.iter().enumerate() {
-                    let bd = self.bonds[b as usize].as_mut().unwrap();
-                    if i % 2 == 0 {
-                        bd.order += 1;
+            // parent[(atom, parity)] = (previous state, bond used)
+            let mut parent: Vec<Option<((AtomId, u8), BondId)>> = vec![None; n * 2];
+            let mut visited = vec![false; n * 2];
+            let idx = |a: AtomId, p: u8| a as usize * 2 + p as usize;
+            visited[idx(s, 0)] = true;
+            let mut queue = VecDeque::from([(s, 0u8, None::<BondId>)]);
+            let mut found: Option<(AtomId, BondId, (AtomId, u8))> = None;
+            'bfs: while let Some((u, parity, came_by)) = queue.pop_front() {
+                let Some(au) = self.atom(u) else { continue };
+                for &b in &au.bonds {
+                    if Some(b) == came_by {
+                        continue;
+                    }
+                    let Some(bd) = self.bond(b) else { continue };
+                    let v = bd.other(u);
+                    if v as usize >= n {
+                        continue;
+                    }
+                    if parity == 0 {
+                        // Increment step.
+                        if bd.order >= 3 {
+                            continue;
+                        }
+                        let need = if v == s { 2 } else { 1 };
+                        if self.free(v) >= need {
+                            found = Some((v, b, (u, parity)));
+                            break 'bfs;
+                        }
+                        if !visited[idx(v, 1)] {
+                            visited[idx(v, 1)] = true;
+                            parent[idx(v, 1)] = Some(((u, parity), b));
+                            queue.push_back((v, 1, Some(b)));
+                        }
                     } else {
-                        bd.order -= 1;
+                        // Decrement step.
+                        if bd.order < 2 || visited[idx(v, 0)] {
+                            continue;
+                        }
+                        visited[idx(v, 0)] = true;
+                        parent[idx(v, 0)] = Some(((u, parity), b));
+                        queue.push_back((v, 0, Some(b)));
                     }
                 }
-                return true;
             }
-        }
-        false
-    }
-
-    fn dfs_augment(
-        &self,
-        start: AtomId,
-        u: AtomId,
-        inc: bool,
-        path: &mut Vec<BondId>,
-        limit: usize,
-    ) -> bool {
-        if path.len() >= limit {
-            return false;
-        }
-        for &b in &self.atom(u).unwrap().bonds {
-            if path.contains(&b) {
+            let Some((_, last_bond, mut state)) = found else {
+                continue;
+            };
+            // Rebuild the path (bond ids, from the end back to s).
+            let mut path = vec![last_bond];
+            while state != (s, 0) {
+                let Some((prev, b)) = parent.get(idx(state.0, state.1)).copied().flatten() else {
+                    break;
+                };
+                path.push(b);
+                state = prev;
+            }
+            if state != (s, 0) {
                 continue;
             }
-            let bd = self.bond(b).unwrap();
-            let v = bd.other(u);
-            if inc {
-                if bd.order >= 3 {
-                    continue;
+            path.reverse();
+            let mut uniq = path.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            if uniq.len() != path.len() {
+                continue; // a path that reuses a bond isn't a valid augmentation
+            }
+            // Apply, then verify; roll back if anything went out of range.
+            let before: Vec<(BondId, u8)> = path
+                .iter()
+                .filter_map(|&b| self.bond(b).map(|bd| (b, bd.order)))
+                .collect();
+            let mut ok = true;
+            for (i, &b) in path.iter().enumerate() {
+                if let Some(bd) = self.bond_mut(b) {
+                    if i % 2 == 0 && bd.order < 3 {
+                        bd.order += 1;
+                    } else if i % 2 == 1 && bd.order > 1 {
+                        bd.order -= 1;
+                    } else {
+                        ok = false;
+                    }
                 }
-                path.push(b);
-                let need = if v == start { 2 } else { 1 };
-                if self.free(v) >= need {
-                    return true;
+            }
+            let ends_ok = path.iter().filter_map(|&b| self.bond(b)).all(|bd| {
+                self.used(bd.a) <= self.capacity(bd.a) && self.used(bd.b) <= self.capacity(bd.b)
+            });
+            if ok && ends_ok {
+                return true;
+            }
+            for (b, o) in before {
+                if let Some(bd) = self.bond_mut(b) {
+                    bd.order = o;
                 }
-                if self.dfs_augment(start, v, false, path, limit) {
-                    return true;
-                }
-                path.pop();
-            } else {
-                if bd.order < 2 {
-                    continue;
-                }
-                path.push(b);
-                if self.dfs_augment(start, v, true, path, limit) {
-                    return true;
-                }
-                path.pop();
             }
         }
         false
@@ -879,7 +1101,7 @@ impl Lab {
     /// Keep one direction per open site / lone pair, preserving existing ones.
     fn sync_domains(&mut self, id: AtomId) {
         let want = (self.free(id) + self.lone_pairs(id)) as usize;
-        let a = self.atom(id).unwrap();
+        let Some(a) = self.atom(id) else { return };
         let pos = a.pos;
         let mut domains = a.domains.clone();
         domains.truncate(want);
@@ -893,10 +1115,11 @@ impl Lab {
             let crowd: Vec3 = nbr_dirs.iter().chain(domains.iter()).copied().sum();
             let j = jitter_dir(id as u64 * 31 + domains.len() as u64 * 977 + salt);
             salt += 1;
-            let d = (-crowd + j * 0.6).normalize_or(j);
-            domains.push(d);
+            domains.push((-crowd + j * 0.6).normalize_or(j));
         }
-        self.atom_mut(id).unwrap().domains = domains;
+        if let Some(a) = self.atom_mut(id) {
+            a.domains = domains;
+        }
     }
 
     pub fn wake(&mut self) {
@@ -921,7 +1144,7 @@ pub(crate) fn jitter_dir(seed: u64) -> Vec3 {
     };
     let zc = next() * 2.0 - 1.0;
     let t = next() * std::f32::consts::TAU;
-    let r = (1.0 - zc * zc).sqrt();
+    let r = (1.0 - zc * zc).max(0.0).sqrt();
     Vec3::new(r * t.cos(), zc, r * t.sin())
 }
 
@@ -949,7 +1172,7 @@ mod tests {
     #[test]
     fn water() {
         let mut lab = Lab::new();
-        let o = lab.add_atom(8, Vec3::ZERO);
+        let o = lab.add_atom(8, Vec3::ZERO).unwrap();
         build(&mut lab, o, &[1, 1]);
         assert_eq!(open(&lab, o), 0);
         assert_eq!(lab.lone_pairs(o), 2);
@@ -965,10 +1188,10 @@ mod tests {
     #[test]
     fn diatomics_get_multiple_bonds() {
         let mut lab = Lab::new();
-        let n = lab.add_atom(7, Vec3::ZERO);
+        let n = lab.add_atom(7, Vec3::ZERO).unwrap();
         let n2 = lab.attach(n, 7, Vec3::X).unwrap();
         assert_eq!(order_between(&lab, n, n2), 3);
-        let o = lab.add_atom(8, Vec3::ZERO);
+        let o = lab.add_atom(8, Vec3::ZERO).unwrap();
         let o2 = lab.attach(o, 8, Vec3::X).unwrap();
         assert_eq!(order_between(&lab, o, o2), 2);
     }
@@ -976,7 +1199,7 @@ mod tests {
     #[test]
     fn carbon_dioxide_and_methane() {
         let mut lab = Lab::new();
-        let c = lab.add_atom(6, Vec3::ZERO);
+        let c = lab.add_atom(6, Vec3::ZERO).unwrap();
         let os = build(&mut lab, c, &[8, 8]);
         assert_eq!(order_between(&lab, c, os[0]), 2);
         assert_eq!(order_between(&lab, c, os[1]), 2);
@@ -985,7 +1208,7 @@ mod tests {
         lab.attach(c, 8, Vec3::X).unwrap();
         assert_eq!(open(&lab, c), 2);
 
-        let c = lab.add_atom(6, Vec3::ZERO);
+        let c = lab.add_atom(6, Vec3::ZERO).unwrap();
         build(&mut lab, c, &[1, 1, 1, 1]);
         assert_eq!(open(&lab, c), 0);
         assert!(lab.check_attach(c, 1).is_err());
@@ -994,7 +1217,7 @@ mod tests {
     #[test]
     fn hydrogenation_of_acetylene() {
         let mut lab = Lab::new();
-        let c1 = lab.add_atom(6, Vec3::ZERO);
+        let c1 = lab.add_atom(6, Vec3::ZERO).unwrap();
         let c2 = lab.attach(c1, 6, Vec3::X).unwrap();
         lab.attach(c1, 1, Vec3::X).unwrap();
         lab.attach(c2, 1, Vec3::X).unwrap();
@@ -1013,13 +1236,13 @@ mod tests {
     #[test]
     fn sulfur_expands() {
         let mut lab = Lab::new();
-        let s = lab.add_atom(16, Vec3::ZERO);
+        let s = lab.add_atom(16, Vec3::ZERO).unwrap();
         build(&mut lab, s, &[8, 8]);
         assert_eq!(open(&lab, s), 0, "SO2 should be closed shell");
         lab.attach(s, 8, Vec3::X).unwrap();
         assert_eq!(open(&lab, s), 0, "SO3");
         assert_eq!(lab.atom(s).unwrap().valence, 6);
-        let f = lab.add_atom(16, Vec3::ZERO);
+        let f = lab.add_atom(16, Vec3::ZERO).unwrap();
         build(&mut lab, f, &[9, 9, 9, 9, 9, 9]);
         assert_eq!(open(&lab, f), 0, "SF6");
         assert!(lab.check_attach(f, 9).is_err());
@@ -1028,7 +1251,7 @@ mod tests {
     #[test]
     fn removal_shrinks_valence() {
         let mut lab = Lab::new();
-        let s = lab.add_atom(16, Vec3::ZERO);
+        let s = lab.add_atom(16, Vec3::ZERO).unwrap();
         let os = build(&mut lab, s, &[8, 8, 8]);
         lab.remove_atom(os[2]);
         assert_eq!(lab.atom(s).unwrap().valence, 4);
@@ -1038,20 +1261,20 @@ mod tests {
     #[test]
     fn ionic_salts() {
         let mut lab = Lab::new();
-        let cl = lab.add_atom(17, Vec3::ZERO);
+        let cl = lab.add_atom(17, Vec3::ZERO).unwrap();
         let na = lab.attach(cl, 11, Vec3::X).unwrap();
         assert_eq!(lab.charge(na), 1);
         assert_eq!(lab.charge(cl), -1);
         assert_eq!(open(&lab, na), 0);
         assert!(lab.check_attach(cl, 11).is_err());
 
-        let mg = lab.add_atom(12, Vec3::ZERO);
+        let mg = lab.add_atom(12, Vec3::ZERO).unwrap();
         let o = lab.attach(mg, 8, Vec3::X).unwrap();
         assert_eq!(lab.charge(mg), 2);
         assert_eq!(lab.charge(o), -2);
         assert_eq!(open(&lab, mg), 0);
 
-        let mg = lab.add_atom(12, Vec3::ZERO);
+        let mg = lab.add_atom(12, Vec3::ZERO).unwrap();
         build(&mut lab, mg, &[17, 17]);
         assert_eq!(open(&lab, mg), 0);
         assert_eq!(lab.charge(mg), 2);
@@ -1060,7 +1283,7 @@ mod tests {
     #[test]
     fn sodium_hydroxide() {
         let mut lab = Lab::new();
-        let o = lab.add_atom(8, Vec3::ZERO);
+        let o = lab.add_atom(8, Vec3::ZERO).unwrap();
         lab.attach(o, 1, Vec3::X).unwrap();
         let na = lab.attach(o, 11, Vec3::X).unwrap();
         assert_eq!(lab.charge(na), 1);
@@ -1071,15 +1294,15 @@ mod tests {
     #[test]
     fn ammonium_and_rejections() {
         let mut lab = Lab::new();
-        let n = lab.add_atom(7, Vec3::ZERO);
+        let n = lab.add_atom(7, Vec3::ZERO).unwrap();
         build(&mut lab, n, &[1, 1, 1, 1]);
         assert_eq!(lab.charge(n), 1);
         assert_eq!(open(&lab, n), 0);
-        let ne = lab.add_atom(10, Vec3::ZERO);
+        let ne = lab.add_atom(10, Vec3::ZERO).unwrap();
         assert!(lab.check_attach(ne, 1).is_err());
-        let fe = lab.add_atom(26, Vec3::ZERO);
+        let fe = lab.add_atom(26, Vec3::ZERO).unwrap();
         assert!(lab.check_attach(fe, 11).is_err());
-        let xe = lab.add_atom(54, Vec3::ZERO);
+        let xe = lab.add_atom(54, Vec3::ZERO).unwrap();
         assert!(lab.check_attach(xe, 1).is_err());
         build(&mut lab, xe, &[9, 9]);
         assert_eq!(open(&lab, xe), 0);
@@ -1089,7 +1312,7 @@ mod tests {
     #[test]
     fn benzene_ring_closure() {
         let mut lab = Lab::new();
-        let c0 = lab.add_atom(6, Vec3::ZERO);
+        let c0 = lab.add_atom(6, Vec3::ZERO).unwrap();
         let mut ring = vec![c0];
         for _ in 0..5 {
             let last = *ring.last().unwrap();
@@ -1107,9 +1330,9 @@ mod tests {
     #[test]
     fn merging_molecules() {
         let mut lab = Lab::new();
-        let c1 = lab.add_atom(6, Vec3::ZERO);
+        let c1 = lab.add_atom(6, Vec3::ZERO).unwrap();
         build(&mut lab, c1, &[1, 1, 1]);
-        let c2 = lab.add_atom(6, Vec3::new(5.0, 0.0, 0.0));
+        let c2 = lab.add_atom(6, Vec3::new(5.0, 0.0, 0.0)).unwrap();
         build(&mut lab, c2, &[1, 1, 1]);
         lab.connect(c1, c2).unwrap();
         assert_eq!(open(&lab, c1), 0);

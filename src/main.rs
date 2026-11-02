@@ -4,9 +4,23 @@
 //! The chemistry lives in the engine-independent `valence_chem` crate; this
 //! binary is a thin Bevy front end over it.
 
+// Release builds on Windows are GUI apps (no console window).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(clippy::too_many_arguments, clippy::type_complexity)] // normal for Bevy systems
+// No-crash policy: no unwrap/expect/panic in app code either.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo
+    )
+)]
 
 mod camera;
+mod crash;
 mod debug;
 mod interact;
 mod palette;
@@ -18,20 +32,36 @@ use bevy::{
     camera::{CameraOutputMode, visibility::RenderLayers},
     prelude::*,
     render::render_resource::BlendState,
-    window::WindowResolution,
+    window::{WindowResizeConstraints, WindowResolution},
+    winit::{UpdateMode, WinitSettings},
 };
 use bevy_egui::{EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
+use std::time::Duration;
 
 fn main() {
+    crash::install_panic_hook();
+
     App::new()
+        // A failing system logs a warning instead of taking the game down.
+        .set_error_handler(bevy::ecs::error::warn)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Valence: build molecules".into(),
                 resolution: WindowResolution::new(1600, 960),
+                resize_constraints: WindowResizeConstraints {
+                    min_width: 720.0,
+                    min_height: 480.0,
+                    ..default()
+                },
                 ..default()
             }),
             ..default()
         }))
+        // Full frame rate while focused; throttle to ~10 fps in the background.
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::reactive_low_power(Duration::from_millis(100)),
+        })
         .add_plugins(EguiPlugin::default())
         .add_plugins(debug::DebugPlugin)
         .init_resource::<state::Chem>()
@@ -55,6 +85,7 @@ fn main() {
             Update,
             (
                 interact::update_pointer,
+                interact::handle_keys,
                 camera::orbit_controls,
                 interact::handle_mouse,
                 scene::step_physics,
