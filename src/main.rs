@@ -1,0 +1,87 @@
+//! Valence: drag elements from the periodic table into a 3D lab and build
+//! molecules under (simplified) real bonding rules.
+//!
+//! The chemistry lives in the engine-independent `valence_chem` crate; this
+//! binary is a thin Bevy front end over it.
+
+#![allow(clippy::too_many_arguments, clippy::type_complexity)] // normal for Bevy systems
+
+mod camera;
+mod debug;
+mod interact;
+mod palette;
+mod scene;
+mod state;
+mod ui;
+
+use bevy::{
+    camera::{CameraOutputMode, visibility::RenderLayers},
+    prelude::*,
+    render::render_resource::BlendState,
+    window::WindowResolution,
+};
+use bevy_egui::{EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Valence: build molecules".into(),
+                resolution: WindowResolution::new(1600, 960),
+                ..default()
+            }),
+            ..default()
+        }))
+        .add_plugins(EguiPlugin::default())
+        .add_plugins(debug::DebugPlugin)
+        .init_resource::<state::Chem>()
+        .init_resource::<state::Drag>()
+        .init_resource::<state::Pointer>()
+        .init_resource::<state::Settings>()
+        .init_resource::<state::Selection>()
+        .init_resource::<state::ViewRect>()
+        .init_resource::<state::Effects>()
+        .init_resource::<scene::VisState>()
+        .init_resource::<ui::FontsReady>()
+        .add_systems(
+            Startup,
+            (camera::spawn_camera, scene::setup_assets, spawn_ui_camera),
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
+            (ui::setup_fonts, ui::ui_system).chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                interact::update_pointer,
+                camera::orbit_controls,
+                interact::handle_mouse,
+                scene::step_physics,
+                scene::sync_structure,
+                scene::sync_transforms,
+            )
+                .chain(),
+        )
+        .run();
+}
+
+/// egui gets its own camera so the 3D camera can be confined to the right
+/// side of the window while the UI covers the whole window.
+fn spawn_ui_camera(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) {
+    egui_settings.auto_create_primary_context = false;
+    commands.spawn((
+        PrimaryEguiContext,
+        Camera2d,
+        RenderLayers::none(),
+        Camera {
+            order: 1,
+            output_mode: CameraOutputMode::Write {
+                blend_state: Some(BlendState::ALPHA_BLENDING),
+                clear_color: ClearColorConfig::None,
+            },
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            ..default()
+        },
+    ));
+}
