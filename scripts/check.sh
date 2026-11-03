@@ -27,4 +27,13 @@ case $code in
     3) echo "FAIL: the game ran but the frame was blank. Unlock the screen / wake the display and retry." >&2; exit 3 ;;
     *) echo "FAIL: game exited with code $code" >&2; exit 1 ;;
 esac
+ft="${TMPDIR:-/tmp}/valence-feature-test"
+rm -rf "$ft"; mkdir -p "$ft"
+echo "== feature test (reactions, exports, settings; opens a window)"
+if VALENCE_FEATURE_TEST="$ft" VALENCE_EXPORT_DIR="$ft" ./target/dist/valence && [[ $(ls "$ft"/valence-*.png 2>/dev/null | wc -l) -eq 3 ]]; then
+    echo "OK: reaction, molecule and lab exports written to $ft"
+else
+    echo "FAIL: feature test (see $ft)" >&2
+    exit 1
+fi
 echo "Binary: target/dist/valence"

@@ -21,11 +21,13 @@
 pub mod canon;
 pub mod compounds;
 pub mod elements;
+pub mod energy;
 pub mod graph;
 pub mod lab;
 pub mod layout;
 pub mod naming;
 pub mod organic;
+pub mod reactions;
 pub mod smiles;
 
 pub use glam::Vec3;

@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
-use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
+use bevy::{
+    camera::Viewport, ecs::system::SystemParam, prelude::*, render::renderer::RenderAdapterInfo,
+    window::PrimaryWindow,
+};
 use bevy_egui::{
     EguiContexts,
     egui::{
@@ -21,9 +24,14 @@ use valence_chem::{
 };
 
 use crate::camera::{OrbitCam, frame_all};
+use crate::export::{DetailsCard, ExportJob};
 use crate::palette::{self, ANION, BAD, CATION, GOOD, OPEN_SITE, to_egui};
 use crate::quality::{GraphicsQuality, Phase, Quality, QualitySetting, RenderStats, Startup};
-use crate::state::{Chem, Drag, Edit, Effects, Pointer, Selection, Settings, ViewRect};
+use crate::reactions_ui::{DiagramBox, ReactionLib, ReactionState, Role, draw_diagram};
+use crate::state::{
+    Chem, Drag, Edit, Effects, ExportTarget, Isolation, Pointer, Selection, Settings, Tab, UiState,
+    ViewRect,
+};
 
 const PANEL_BG: Color32 = Color32::from_rgb(17, 19, 25);
 const CARD_BG: Color32 = Color32::from_rgb(26, 29, 37);
@@ -78,32 +86,59 @@ pub fn setup_fonts(mut contexts: EguiContexts, mut ready: ResMut<FontsReady>) ->
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything the UI reads or changes, grouped to stay within Bevy's
+/// system-parameter limit.
+#[derive(SystemParam)]
+pub struct UiRes<'w> {
+    chem: ResMut<'w, Chem>,
+    drag: ResMut<'w, Drag>,
+    pointer: Res<'w, Pointer>,
+    settings: ResMut<'w, Settings>,
+    selection: ResMut<'w, Selection>,
+    effects: ResMut<'w, Effects>,
+    view: ResMut<'w, ViewRect>,
+    time: Res<'w, Time>,
+    quality: ResMut<'w, GraphicsQuality>,
+    startup: ResMut<'w, Startup>,
+    stats: Res<'w, RenderStats>,
+    state: ResMut<'w, UiState>,
+    reaction: ResMut<'w, ReactionState>,
+    library: Res<'w, ReactionLib>,
+    export: ResMut<'w, ExportJob>,
+    isolation: Res<'w, Isolation>,
+    adapter: Option<Res<'w, RenderAdapterInfo>>,
+}
+
 pub fn ui_system(
     mut contexts: EguiContexts,
     mut camera: Single<(&mut Camera, &GlobalTransform, &mut OrbitCam)>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mut chem: ResMut<Chem>,
-    mut drag: ResMut<Drag>,
-    pointer: Res<Pointer>,
-    mut settings: ResMut<Settings>,
-    mut selection: ResMut<Selection>,
-    mut effects: ResMut<Effects>,
-    mut view: ResMut<ViewRect>,
-    time: Res<Time>,
     ready: Res<FontsReady>,
-    mut quality: ResMut<GraphicsQuality>,
-    mut startup: ResMut<Startup>,
-    stats: Res<RenderStats>,
+    r: UiRes,
 ) -> Result {
     if ready.0 < 3 {
         return Ok(());
     }
-    let mut gfx = Gfx {
-        quality: &mut quality,
-        startup: &mut startup,
-        compiling: stats.compiling(),
-    };
+    let UiRes {
+        mut chem,
+        mut drag,
+        pointer,
+        mut settings,
+        mut selection,
+        mut effects,
+        mut view,
+        time,
+        mut quality,
+        mut startup,
+        stats,
+        mut state,
+        mut reaction,
+        library,
+        mut export,
+        isolation,
+        adapter,
+    } = r;
+    let now = time.elapsed_secs_f64();
     let ctx = contexts.ctx_mut()?.clone();
     chem.refresh();
     let (cam, cam_gt, rig) = &mut *camera;
@@ -129,20 +164,114 @@ pub fn ui_system(
         .max_size(max_panel)
         .frame(egui::Frame::new().fill(PANEL_BG).inner_margin(14.0))
         .show(&mut root, |ui| {
-            panel(
-                ui,
-                &mut chem,
-                &mut drag,
-                &mut settings,
-                &mut selection,
-                &mut effects,
-                rig,
-                &pointer,
-                time.elapsed_secs_f64(),
-                &mut gfx,
-            );
+            // Header: ☰ menu, title, tabs.
+            ui.horizontal(|ui| {
+                crate::menu::menu_button(
+                    ui,
+                    &mut chem,
+                    &mut state,
+                    &mut selection,
+                    &mut effects,
+                    now,
+                );
+                ui.label(
+                    RichText::new("Valence")
+                        .font(bold(26.0))
+                        .color(Color32::WHITE),
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("drag elements into the lab →").color(MUTED));
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for (tab, label) in [
+                    (Tab::Build, "Build"),
+                    (Tab::Reactions, "Reactions"),
+                    (Tab::Export, "Export"),
+                ] {
+                    let selected = state.tab == tab;
+                    let text = RichText::new(label).size(15.0).strong();
+                    if ui
+                        .add(egui::Button::selectable(selected, text).min_size(vec2(96.0, 28.0)))
+                        .clicked()
+                    {
+                        state.tab = tab;
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            let mut gfx = Gfx {
+                quality: &mut quality,
+                startup: &mut startup,
+                compiling: stats.compiling(),
+            };
+            match state.tab {
+                Tab::Build => build_tab(
+                    ui,
+                    &mut chem,
+                    &mut drag,
+                    &mut settings,
+                    &mut selection,
+                    &mut effects,
+                    rig,
+                    &pointer,
+                    now,
+                    &mut gfx,
+                ),
+                Tab::Reactions => {
+                    // The periodic table stays handy for building inputs.
+                    let hovered = periodic_table(
+                        ui,
+                        &mut chem,
+                        &mut drag,
+                        &mut selection,
+                        &mut effects,
+                        rig,
+                        now,
+                    );
+                    if hovered.is_some() {
+                        selection.element = hovered;
+                    }
+                    ui.add_space(8.0);
+                    let mut show = state.show_reaction_diagram;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            crate::reactions_ui::reactions_tab(
+                                ui,
+                                &mut chem,
+                                &mut reaction,
+                                &library.0,
+                                &mut selection,
+                                &mut effects,
+                                rig,
+                                &mut show,
+                                now,
+                            );
+                        });
+                    state.show_reaction_diagram = show;
+                }
+                Tab::Export => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            crate::export::export_tab(
+                                ui,
+                                &mut state,
+                                &mut export,
+                                &chem,
+                                &selection,
+                                &reaction,
+                            );
+                        });
+                }
+            }
         });
     let left = panel.response.rect.width();
+
+    crate::menu::settings_window(&ctx, &mut state, &mut quality, adapter.as_deref());
+    crate::menu::help_window(&ctx, &mut state);
+    crate::menu::about_window(&ctx, &mut state);
 
     // 3D viewport = everything right of the panel.
     // A minimised or degenerate window has no room for a viewport: render
@@ -170,6 +299,27 @@ pub fn ui_system(
         window.height(),
     );
 
+    // The reaction diagram shows on the Reactions tab (or in a reaction export).
+    let diagram = ((state.tab == Tab::Reactions && state.show_reaction_diagram)
+        || (export.capturing() && state.export_target == ExportTarget::Reaction))
+        .then(|| {
+            reaction
+                .parts(&chem)
+                .into_iter()
+                .map(|p| (p.role, chem.molecules[p.molecule].atoms.clone(), p.coeff))
+                .collect::<Vec<_>>()
+        });
+    let gfx = Gfx {
+        quality: &mut quality,
+        startup: &mut startup,
+        compiling: stats.compiling(),
+    };
+    let scene = SceneOverlay {
+        isolation: &isolation,
+        capturing: export.capturing(),
+        card: export.card.as_ref(),
+        diagram,
+    };
     overlays(
         &ctx,
         &chem,
@@ -181,10 +331,19 @@ pub fn ui_system(
         &selection,
         &mut effects,
         view.0,
-        time.elapsed_secs_f64(),
+        now,
         &gfx,
+        &scene,
     );
     Ok(())
+}
+
+/// Extra overlay inputs: export isolation/card and the reaction diagram.
+struct SceneOverlay<'a> {
+    isolation: &'a Isolation,
+    capturing: bool,
+    card: Option<&'a DetailsCard>,
+    diagram: Option<Vec<(Role, Vec<AtomId>, u32)>>,
 }
 
 /// Graphics quality + startup progress, passed to the UI pieces.
@@ -199,8 +358,7 @@ struct Gfx<'a> {
 // Left panel
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn panel(
+fn build_tab(
     ui: &mut egui::Ui,
     chem: &mut Chem,
     drag: &mut Drag,
@@ -212,17 +370,6 @@ fn panel(
     now: f64,
     gfx: &mut Gfx,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Valence")
-                .font(bold(26.0))
-                .color(Color32::WHITE),
-        );
-        ui.add_space(8.0);
-        ui.label(RichText::new("drag elements into the lab →").color(MUTED));
-    });
-    ui.add_space(8.0);
-
     let hovered = periodic_table(ui, chem, drag, selection, effects, rig, now);
     if hovered.is_some() {
         selection.element = hovered;
@@ -240,14 +387,12 @@ fn panel(
             // Molecule under the mouse wins over the selected one.
             let focus_atom = pointer.hovered_atom.or(selection.atom);
             if let Some(m) = focus_atom.and_then(|a| chem.molecule_of(a)) {
-                molecule_card(ui, &m.names, m.atoms.len());
+                molecule_card(ui, &m.names, &chem.lab.graph(&m.atoms));
                 ui.add_space(8.0);
             }
             molecule_list(ui, chem, selection, rig);
             ui.add_space(8.0);
             controls(ui, chem, settings, selection, rig);
-            ui.add_space(8.0);
-            graphics_controls(ui, gfx);
         });
 }
 
@@ -487,38 +632,37 @@ fn status_text(n: &Names) -> (String, Color32) {
     }
 }
 
-fn molecule_card(ui: &mut egui::Ui, n: &Names, atoms: usize) {
+fn molecule_card(ui: &mut egui::Ui, n: &Names, g: &valence_chem::MolGraph) {
     card(ui, |ui| {
         ui.label(
             RichText::new(&n.title)
                 .font(bold(20.0))
                 .color(Color32::WHITE),
         );
-        if !n.iupac.is_empty() && n.iupac.to_lowercase() != n.title.to_lowercase() {
+        if !n.iupac.is_empty()
+            && n.iupac.to_lowercase() != n.title.to_lowercase()
+            && n.common.is_none()
+        {
             ui.label(RichText::new(format!("IUPAC: {}", n.iupac)).color(Color32::from_gray(210)));
         }
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(&n.formula)
-                    .font(bold(18.0))
-                    .color(Color32::from_rgb(170, 200, 255)),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "{:.2} g/mol · {} atom{}",
-                    n.mass,
-                    atoms,
-                    if atoms == 1 { "" } else { "s" }
-                ))
-                .color(MUTED),
-            );
-        });
-        if n.charge != 0 {
-            let c = if n.charge > 0 { CATION } else { ANION };
-            ui.label(
-                RichText::new(format!("Ion, net charge {}", signed(n.charge))).color(to_egui(c)),
-            );
-        }
+        ui.label(
+            RichText::new(&n.formula)
+                .font(bold(18.0))
+                .color(Color32::from_rgb(170, 200, 255)),
+        );
+        egui::Grid::new("molecule_facts")
+            .num_columns(2)
+            .spacing([10.0, 3.0])
+            .show(ui, |ui| {
+                for (k, v) in crate::facts::molecule_facts(n, g) {
+                    if k == "Formula" {
+                        continue;
+                    }
+                    ui.label(RichText::new(k).size(12.5).color(MUTED));
+                    ui.label(RichText::new(v).size(12.5));
+                    ui.end_row();
+                }
+            });
         let (s, c) = status_text(n);
         ui.label(RichText::new(s).font(bold(14.0)).color(c));
     });
@@ -612,14 +756,9 @@ fn controls(
     });
     ui.add_space(6.0);
     ui.label(
-        RichText::new(
-            "Drag atom: move molecule · Shift+drag atom: move one atom (close rings)\n\
-             Drop an atom on another: bond them · Drag empty space: orbit · Shift+drag: pan\n\
-             Right/middle-drag also orbit/pan · Scroll or pinch: zoom · F: frame all\n\
-             Right-click or Delete/Backspace: remove atom · Ctrl/Cmd+Z: undo · Esc: cancel",
-        )
-        .size(11.5)
-        .color(MUTED),
+        RichText::new("Full controls: ☰ menu → Help → Controls")
+            .size(11.5)
+            .color(MUTED),
     );
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
@@ -661,7 +800,9 @@ fn overlays(
     view: Rect,
     now: f64,
     gfx: &Gfx,
+    scene: &SceneOverlay,
 ) {
+    let capturing = scene.capturing;
     let clip = egui::Rect::from_min_max(pos2(view.min.x, view.min.y), pos2(view.max.x, view.max.y));
     preparing_indicator(ctx, gfx, clip, now);
     let painter = ctx
@@ -679,6 +820,9 @@ fn overlays(
     };
     let mut atoms: Vec<Projected> = Vec::with_capacity(chem.lab.atom_count());
     for (id, a) in chem.lab.atoms() {
+        if !scene.isolation.shows(id) {
+            continue;
+        }
         let depth = (a.pos - cam_pos).dot(*fwd);
         if depth <= 0.1 {
             continue;
@@ -773,7 +917,7 @@ fn overlays(
     }
 
     // Selection ring.
-    if let Some(p) = selection.atom.and_then(screen_of) {
+    if !capturing && let Some(p) = selection.atom.and_then(screen_of) {
         painter.circle_stroke(
             p.pos,
             p.r + 5.0,
@@ -813,8 +957,33 @@ fn overlays(
         }
     }
 
-    // Drag feedback.
-    if let Some(cursor) = pointer.pos.map(|p| pos2(p.x, p.y)) {
+    // Reaction diagram (+, arrow, coefficients, captions).
+    if let Some(parts) = &scene.diagram {
+        let boxes: Vec<DiagramBox> = parts
+            .iter()
+            .filter_map(|(role, atoms, coeff)| {
+                let pts: Vec<&Projected> = atoms.iter().filter_map(|&a| screen_of(a)).collect();
+                let rect = pts
+                    .iter()
+                    .map(|p| egui::Rect::from_center_size(p.pos, vec2(p.r * 2.0, p.r * 2.0)))
+                    .reduce(|a, b| a.union(b))?;
+                Some(DiagramBox {
+                    role: *role,
+                    rect,
+                    coeff: *coeff,
+                })
+            })
+            .collect();
+        draw_diagram(&painter, &boxes);
+    }
+
+    // Details card on exported images.
+    if let Some(card) = scene.card {
+        details_card(&painter, ctx, clip, card);
+    }
+
+    // Drag feedback and hover tooltips (never in exported images).
+    if let Some(cursor) = pointer.pos.map(|p| pos2(p.x, p.y)).filter(|_| !capturing) {
         let dragging = matches!(drag, Drag::Palette(_) | Drag::Atom { .. });
         if dragging
             && let (Some(t), Some(check)) = (
@@ -891,7 +1060,7 @@ fn overlays(
 
     // Success / failure bursts.
     effects.0.retain(|e| now - e.born < 2.2);
-    for e in &effects.0 {
+    for e in effects.0.iter().filter(|_| !capturing) {
         let Some(p) = project(e.at) else { continue };
         let age = (now - e.born) as f32;
         let k = (age / 2.2).clamp(0.0, 1.0);
@@ -1068,45 +1237,47 @@ fn slow_start_hint(ui: &mut egui::Ui, gfx: &mut Gfx) {
     ui.add_space(8.0);
 }
 
-fn graphics_controls(ui: &mut egui::Ui, gfx: &mut Gfx) {
-    let active = match gfx.quality.active {
-        Quality::Full => "Full",
-        Quality::Lite => "Lite",
+/// The card drawn on exported images: title, subtitle and label/value rows.
+fn details_card(p: &egui::Painter, ctx: &egui::Context, clip: egui::Rect, card: &DetailsCard) {
+    let width = (clip.width() * 0.42).clamp(260.0, 440.0);
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |font: FontId, color: Color32| egui::TextFormat {
+        font_id: font,
+        color,
+        ..Default::default()
     };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Graphics").font(bold(13.0)).color(MUTED));
-        let mut choice = gfx.quality.saved;
-        egui::ComboBox::from_id_salt("graphics_quality")
-            .selected_text(match choice {
-                QualitySetting::Auto => "Auto",
-                QualitySetting::Full => "Full",
-                QualitySetting::Lite => "Lite",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut choice, QualitySetting::Auto, "Auto (detect)");
-                ui.selectable_value(
-                    &mut choice,
-                    QualitySetting::Full,
-                    "Full: glow and transparency",
-                );
-                ui.selectable_value(
-                    &mut choice,
-                    QualitySetting::Lite,
-                    "Lite: fast start on older GPUs",
-                );
-            });
-        if choice != gfx.quality.saved {
-            gfx.quality.save(choice);
-        }
-    });
-    let mut status = format!("Now: {active} ({})", gfx.quality.reason);
-    let would_change = match gfx.quality.saved {
-        QualitySetting::Auto => false,
-        QualitySetting::Full => gfx.quality.active != Quality::Full,
-        QualitySetting::Lite => gfx.quality.active != Quality::Lite,
-    };
-    if would_change {
-        status.push_str(" · changes apply next launch");
+    job.wrap.max_width = width - 28.0;
+    job.append(&card.title, 0.0, fmt(bold(21.0), Color32::WHITE));
+    if !card.subtitle.is_empty() {
+        job.append(
+            &format!("\n{}", card.subtitle),
+            0.0,
+            fmt(bold(16.0), Color32::from_rgb(170, 200, 255)),
+        );
     }
-    ui.label(RichText::new(status).size(11.5).color(MUTED));
+    for (k, v) in &card.rows {
+        job.append(&format!("\n{k}: "), 0.0, fmt(bold(13.0), MUTED));
+        job.append(
+            v,
+            0.0,
+            fmt(FontId::proportional(13.0), Color32::from_gray(225)),
+        );
+    }
+    let galley = ctx.fonts_mut(|f| f.layout_job(job));
+    let rect = egui::Rect::from_min_size(
+        clip.min + vec2(16.0, 16.0),
+        galley.size() + vec2(28.0, 24.0),
+    );
+    p.rect_filled(
+        rect,
+        CornerRadius::same(10),
+        Color32::from_rgba_unmultiplied(14, 16, 22, 235),
+    );
+    p.rect_stroke(
+        rect,
+        CornerRadius::same(10),
+        Stroke::new(1.0, Color32::from_gray(70)),
+        StrokeKind::Inside,
+    );
+    p.galley(rect.min + vec2(14.0, 12.0), galley, Color32::WHITE);
 }

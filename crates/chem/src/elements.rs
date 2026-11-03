@@ -305,6 +305,13 @@ pub fn valence_electrons(z: u8) -> u8 {
     }
 }
 
+/// No stable isotope: technetium, promethium, and everything from polonium
+/// (84) up. (Bismuth-209 decays with a half-life ~10⁹ × the age of the
+/// universe, so it's treated as stable.)
+pub fn is_radioactive(z: u8) -> bool {
+    z == 43 || z == 61 || z >= 84
+}
+
 /// Elements that can accept a proton onto a lone pair to form an "-onium"
 /// cation (NH4+, H3O+, PH4+, H3S+).
 pub fn can_protonate(z: u8) -> bool {
@@ -424,6 +431,12 @@ mod tests {
         for z in 1..=118 {
             assert!(seen.insert(table_pos(z)), "duplicate cell for {z}");
         }
+    }
+
+    #[test]
+    fn radioactivity() {
+        assert!(is_radioactive(43) && is_radioactive(92) && is_radioactive(86));
+        assert!(!is_radioactive(83) && !is_radioactive(6) && !is_radioactive(82));
     }
 
     #[test]

@@ -4417,6 +4417,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "blake3",
+ "image",
  "valence_chem",
  "wgpu",
 ]

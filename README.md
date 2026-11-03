@@ -47,6 +47,63 @@ nothing beyond Rust. No C compiler is required on any platform.
 - Every molecule has a tag with its name, formula, IUPAC name, and whether
   it is **complete** (no open bonding sites).
 
+## Interface
+
+- **☰ menu** (left of the title):
+  - **File:** New lab, Open example shelf, Export image…, Quit.
+  - **Edit:** Undo, Redo, Delete selected atom, Select none.
+  - **Settings…**
+  - **Help:** Controls, About.
+- **Settings window:** graphics quality (Auto/Full/Lite), graphics API
+  (Auto, DirectX 12, Vulkan, Metal or OpenGL, depending on OS), the GPU in
+  use, and the settings, exported images and crash log locations. Graphics
+  changes apply on the next launch. An API that turns out not to be available
+  falls back to Auto instead of stopping the game from starting.
+- **Sidebar tabs:**
+  - **Build:** periodic table, element and molecule info, molecule list, and
+    quick toggles (symbols, names, lone pairs).
+  - **Reactions:** see below.
+  - **Export:** image export with its own quick toggles.
+
+## Exporting images
+
+On the **Export** tab (or **☰ → File → Export image…**), choose what to
+export:
+
+- **Whole build area** as you currently see it.
+- **Selected molecule:** isolated and framed on its own.
+- **Reaction:** its molecules, with the + / → diagram.
+
+Optionally include atom symbols and name tags, and a **details card**. For a
+molecule the card shows the name, IUPAC name, formula, molar mass, atoms,
+bond types, estimated bond energy, charge, reactivity and radioactivity. The
+image is cropped to the 3D view and saved to `Pictures/Valence`, and your view
+is restored exactly afterwards.
+
+## Reactions
+
+On the **Reactions** tab, select molecules in the 3D view and add them as
+**inputs**, **catalysts** or **outputs**, each with a coefficient. Valence:
+
+- writes the equation, e.g. `2 H₂ + O₂ → 2 H₂O`, with any catalyst over the
+  arrow;
+- checks that every atom and the charge balance, and can **balance the
+  coefficients** automatically (exact integer arithmetic);
+- estimates the **energy change** from average bond energies (exothermic or
+  endothermic);
+- recognises well-known reactions from a built-in library: combustion of
+  hydrogen, methane and ethanol; respiration and photosynthesis; the
+  Haber–Bosch and Contact processes; H₂O₂ decomposition; neutralisation;
+  hydrogenation; limestone decomposition; rusting; and more. It also checks
+  whether the right catalyst is present, and **"Build the products"** adds
+  them to the lab for you;
+- **Arrange in 3D** lays the reaction out left to right (catalyst above the
+  arrow) and draws "+", "→", coefficients and captions over the view.
+
+Predicting the products of arbitrary inputs isn't possible with a valence
+model. Outside the library you build the outputs yourself, and Valence checks
+them.
+
 ## Chemistry model
 
 A simplified but grounded valence model, in `crates/chem`:
@@ -195,7 +252,13 @@ src/          Bevy 0.20 front end
   camera.rs    orbit camera confined to the right-hand viewport
   state.rs     Chem resource: transactional edits, undo/redo, cached names
   crash.rs     panic hook → crash log, catch_unwind guard
-  debug.rs     --demo scene, VALENCE_SCREENSHOT / VALENCE_ZOOM / VALENCE_WINDOW / VALENCE_FAKE_DRAG
+  menu.rs      ☰ menu, Settings / Help / About windows
+  export.rs    PNG export (isolate, frame, capture, crop, restore)
+  reactions_ui.rs  Reactions tab, 3D arrangement and diagram
+  facts.rs     molecule facts for info cards and exports
+  quality.rs   Full/Lite graphics and staged startup
+  debug.rs     --demo scene, VALENCE_SCREENSHOT / VALENCE_FEATURE_TEST / VALENCE_EXPORT_DIR /
+               VALENCE_ZOOM / VALENCE_WINDOW / VALENCE_FAKE_DRAG
 scripts/      check.sh (macOS/Linux) and check.ps1 (Windows) local verification
 ```
 

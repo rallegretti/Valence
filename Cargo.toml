@@ -48,6 +48,8 @@ bevy_egui = { version = "0.43.1", default-features = false, features = ["render"
 blake3 = { version = "1.8", features = ["pure"] }
 # Same wgpu as Bevy uses; only for probing GPU adapters at startup (gpu.rs).
 wgpu = { version = "30.0.1", default-features = false }
+# Same image crate as Bevy; used to crop and save exported PNGs.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Windows: compile shaders with Microsoft's DXC, linked into the exe. The
 # default FXC compiler was far too slow on older GPUs (the window stayed black).

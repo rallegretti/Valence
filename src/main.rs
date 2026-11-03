@@ -22,10 +22,14 @@
 mod camera;
 mod crash;
 mod debug;
+mod export;
+mod facts;
 mod gpu;
 mod interact;
+mod menu;
 mod palette;
 mod quality;
+mod reactions_ui;
 mod scene;
 mod settings_file;
 mod state;
@@ -99,6 +103,11 @@ fn main() -> AppExit {
         .init_resource::<state::Effects>()
         .init_resource::<scene::VisState>()
         .init_resource::<ui::FontsReady>()
+        .init_resource::<state::UiState>()
+        .init_resource::<state::Isolation>()
+        .init_resource::<export::ExportJob>()
+        .init_resource::<reactions_ui::ReactionState>()
+        .init_resource::<reactions_ui::ReactionLib>()
         .add_systems(
             Startup,
             (camera::spawn_camera, scene::setup_assets, spawn_ui_camera),
@@ -117,7 +126,10 @@ fn main() -> AppExit {
                 interact::handle_mouse,
                 scene::step_physics,
                 scene::sync_structure,
+                export::run_export,
+                scene::apply_isolation,
                 scene::sync_transforms,
+                menu::handle_quit,
             )
                 .chain(),
         )

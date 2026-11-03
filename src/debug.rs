@@ -44,6 +44,15 @@ impl Plugin for DebugPlugin {
             app.insert_resource(ScreenshotPath(path))
                 .add_systems(Update, screenshot_then_exit);
         }
+        if let Ok(dir) = std::env::var("VALENCE_FEATURE_TEST") {
+            app.insert_resource(FeatureTest {
+                dir: dir.into(),
+                step: 0,
+                wait: 0,
+                shots: Vec::new(),
+            })
+            .add_systems(Update, feature_test);
+        }
         if let Ok(spec) = std::env::var("VALENCE_WINDOW") {
             let v: Vec<u32> = spec
                 .split(',')
@@ -228,7 +237,7 @@ fn chain(lab: &mut Lab, target: AtomId, zs: &[u8]) -> Result<(), Reject> {
 }
 
 /// Builds the demo shelf; returns one atom of each molecule.
-fn build_demo(lab: &mut Lab) -> Result<Vec<AtomId>, Reject> {
+pub(crate) fn build_demo(lab: &mut Lab) -> Result<Vec<AtomId>, Reject> {
     let grid = |i: usize| V::new((i % 4) as f32 * 8.0 - 12.0, 6.0 - (i / 4) as f32 * 8.0, 0.0);
     let mut roots = Vec::new();
     let mut add = |lab: &mut Lab, z: u8| -> Result<AtomId, Reject> {
@@ -327,5 +336,168 @@ fn demo_scene(
             rig.yaw = v.get(1).copied().unwrap_or(0.0);
             rig.pitch = v.get(2).copied().unwrap_or(-0.1);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VALENCE_FEATURE_TEST=dir: drive the reactions, export and settings UI
+// end to end, saving window screenshots and exports into `dir`, then exit.
+// ---------------------------------------------------------------------------
+
+#[derive(Resource)]
+pub struct FeatureTest {
+    dir: std::path::PathBuf,
+    step: u32,
+    wait: u32,
+    shots: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn feature_test(
+    mut commands: Commands,
+    mut test: ResMut<FeatureTest>,
+    mut chem: ResMut<Chem>,
+    mut ui: ResMut<crate::state::UiState>,
+    mut reaction: ResMut<crate::reactions_ui::ReactionState>,
+    lib: Res<crate::reactions_ui::ReactionLib>,
+    mut job: ResMut<crate::export::ExportJob>,
+    mut selection: ResMut<Selection>,
+    mut effects: ResMut<crate::state::Effects>,
+    mut rig: Single<&mut OrbitCam>,
+    startup: Res<crate::quality::Startup>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    use crate::reactions_ui::Role;
+    use crate::state::{ExportTarget, Tab};
+    if startup.phase != crate::quality::Phase::Ready {
+        return;
+    }
+    if test.wait > 0 {
+        test.wait -= 1;
+        return;
+    }
+    let shot = |commands: &mut Commands, test: &mut FeatureTest, name: &str| {
+        let path = test.dir.join(name);
+        test.shots.push(path.display().to_string());
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
+    };
+    let export_done = |job: &crate::export::ExportJob| !job.busy() && job.last.is_some();
+    match test.step {
+        0 => {
+            // H2 and O2 as inputs.
+            let built = chem.edit("test", |lab| {
+                lab.clear();
+                let h2 = lab.add_molecule(
+                    &valence_chem::smiles::parse("[H][H]").map_err(Reject)?,
+                    V::new(-4.0, 0.0, 0.0),
+                )?;
+                let o2 = lab.add_molecule(
+                    &valence_chem::smiles::parse("O=O").map_err(Reject)?,
+                    V::new(4.0, 0.0, 0.0),
+                )?;
+                Ok((h2[0], o2[0]))
+            });
+            let crate::state::Edit::Done((h2, o2)) = built else {
+                error!("feature test: couldn't build inputs");
+                exit.write(AppExit::from_code(5));
+                return;
+            };
+            chem.refresh();
+            for a in [h2, o2] {
+                if let Some(&m) = chem.atom_mol.get(a as usize) {
+                    reaction.set(&chem, m, Role::Input, 1);
+                }
+            }
+            ui.tab = Tab::Reactions;
+            test.step = 1;
+            test.wait = 10;
+        }
+        1 => {
+            let parts = reaction.parts(&chem);
+            let graphs: Vec<(valence_chem::MolGraph, u32)> = parts
+                .iter()
+                .map(|p| (chem.lab.graph(&chem.molecules[p.molecule].atoms), p.coeff))
+                .collect();
+            let inputs: Vec<(&valence_chem::MolGraph, u32)> =
+                graphs.iter().map(|(g, c)| (g, *c)).collect();
+            let a = lib.0.analyse(&inputs, &[]);
+            let Some(&i) = a.matches.first() else {
+                error!("feature test: H2 + O2 not recognised");
+                exit.write(AppExit::from_code(5));
+                return;
+            };
+            info!(
+                "feature test: recognised '{}'",
+                lib.0.reactions()[i].info.name
+            );
+            crate::reactions_ui::build_products(
+                &mut chem,
+                &mut reaction,
+                &lib.0,
+                i,
+                &rig,
+                &mut effects,
+                0.0,
+            );
+            chem.refresh();
+            crate::reactions_ui::arrange(&mut chem, &reaction, &mut rig);
+            info!("feature test: equation {}", reaction.equation(&chem));
+            test.step = 2;
+            test.wait = 90;
+        }
+        2 => {
+            shot(&mut commands, &mut test, "1-reactions-tab.png");
+            test.step = 3;
+            test.wait = 20;
+        }
+        3 => {
+            ui.tab = Tab::Export;
+            ui.export_target = ExportTarget::Reaction;
+            job.request();
+            test.step = 4;
+        }
+        4 if export_done(&job) => {
+            info!("feature test: reaction export {:?}", job.last);
+            // Select the water molecule (an output) for a single-molecule export.
+            let water = chem
+                .molecules
+                .iter()
+                .find(|m| m.names.formula == "H₂O")
+                .and_then(|m| m.atoms.first().copied());
+            selection.atom = water;
+            ui.export_target = ExportTarget::Molecule;
+            job.request();
+            test.step = 5;
+        }
+        5 if export_done(&job) => {
+            info!("feature test: molecule export {:?}", job.last);
+            ui.export_target = ExportTarget::Lab;
+            job.request();
+            test.step = 6;
+        }
+        6 if export_done(&job) => {
+            info!("feature test: lab export {:?}", job.last);
+            test.wait = 10;
+            test.step = 7;
+        }
+        7 => {
+            shot(&mut commands, &mut test, "2-export-tab.png");
+            ui.settings_open = true;
+            test.wait = 15;
+            test.step = 8;
+        }
+        8 => {
+            shot(&mut commands, &mut test, "3-settings.png");
+            test.wait = 20;
+            test.step = 9;
+        }
+        9 => {
+            info!("feature test: done; window shots {:?}", test.shots);
+            exit.write(AppExit::Success);
+            test.step = 10;
+        }
+        _ => {}
     }
 }

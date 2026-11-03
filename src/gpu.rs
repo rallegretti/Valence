@@ -12,9 +12,93 @@
 
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 
-/// Graphics APIs to use: `WGPU_BACKEND` if set, else the platform default.
+/// The player's graphics API preference (Settings window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiSetting {
+    Auto,
+    Dx12,
+    Vulkan,
+    Metal,
+    OpenGl,
+}
+
+impl ApiSetting {
+    pub const ALL: [ApiSetting; 5] = [
+        Self::Auto,
+        Self::Dx12,
+        Self::Vulkan,
+        Self::Metal,
+        Self::OpenGl,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (recommended)",
+            Self::Dx12 => "DirectX 12",
+            Self::Vulkan => "Vulkan",
+            Self::Metal => "Metal",
+            Self::OpenGl => "OpenGL (compatibility)",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dx12 => "dx12",
+            Self::Vulkan => "vulkan",
+            Self::Metal => "metal",
+            Self::OpenGl => "gl",
+        }
+    }
+
+    fn backends(self) -> Option<Backends> {
+        match self {
+            Self::Auto => None,
+            Self::Dx12 => Some(Backends::DX12),
+            Self::Vulkan => Some(Backends::VULKAN),
+            Self::Metal => Some(Backends::METAL),
+            Self::OpenGl => Some(Backends::GL),
+        }
+    }
+
+    /// Choices that make sense on this operating system.
+    pub fn available(self) -> bool {
+        match self {
+            Self::Dx12 => cfg!(windows),
+            Self::Metal => cfg!(target_os = "macos"),
+            Self::Vulkan | Self::OpenGl => !cfg!(target_os = "macos"),
+            Self::Auto => true,
+        }
+    }
+
+    pub fn saved() -> ApiSetting {
+        let v = crate::settings_file::get("graphics_api").unwrap_or_default();
+        Self::ALL
+            .into_iter()
+            .find(|a| a.key() == v.trim())
+            .unwrap_or(Self::Auto)
+    }
+
+    pub fn save(self) {
+        crate::settings_file::set("graphics_api", self.key());
+    }
+}
+
+/// Graphics APIs to use: `WGPU_BACKEND` if set, else the saved preference
+/// (only if a GPU is actually available through it, so a bad choice can't
+/// stop the game starting), else the platform default.
 pub fn choose_backends() -> Backends {
-    Backends::from_env().unwrap_or_else(default_backends)
+    if let Some(b) = Backends::from_env() {
+        return b;
+    }
+    let saved = ApiSetting::saved();
+    if let Some(b) = saved.backends()
+        && saved.available()
+        && has_adapter(b)
+    {
+        return b;
+    }
+    default_backends()
 }
 
 pub fn render_creation(backends: Backends) -> RenderCreation {
@@ -48,7 +132,6 @@ fn instance(backends: Backends) -> wgpu::Instance {
 
 /// Is there at least one usable GPU adapter for these backends? Probing only
 /// enumerates adapters (no device is created), and any panic counts as "no".
-#[cfg(windows)]
 fn has_adapter(backends: Backends) -> bool {
     crate::crash::guard("adapter probe", || {
         !bevy::tasks::block_on(instance(backends).enumerate_adapters(backends)).is_empty()

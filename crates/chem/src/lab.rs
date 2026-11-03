@@ -572,6 +572,98 @@ impl Lab {
         Ok(id)
     }
 
+    /// Add a whole molecule (e.g. a reaction product from the built-in
+    /// library) around `origin`. Bond kinds follow the normal pair rules and
+    /// bond orders come from the solver, so the result is exactly what the
+    /// player would get building it by hand. All-or-nothing: on any problem
+    /// the lab is left unchanged.
+    pub fn add_molecule(&mut self, g: &MolGraph, origin: Vec3) -> Result<Vec<AtomId>, Reject> {
+        if g.is_empty() {
+            return reject("Nothing to add.");
+        }
+        if self.atom_count() + g.len() > MAX_ATOMS {
+            return reject(format!(
+                "The lab is full ({MAX_ATOMS} atoms). Remove something first."
+            ));
+        }
+        let mut trial = self.clone();
+        let origin = if origin.is_finite() {
+            origin
+        } else {
+            Vec3::ZERO
+        };
+
+        // Lay atoms out breadth-first so bonded atoms start near each other;
+        // the layout physics tidies up from there.
+        let n = g.len();
+        let mut pos = vec![None::<Vec3>; n];
+        for start in 0..n {
+            if pos[start].is_some() {
+                continue;
+            }
+            pos[start] = Some(origin + jitter_dir(start as u64 * 131) * 0.5 * start as f32);
+            let mut queue = VecDeque::from([start]);
+            while let Some(u) = queue.pop_front() {
+                let pu = pos[u].unwrap_or(origin);
+                for (k, &(v, _)) in g.neighbors(u).iter().enumerate() {
+                    if pos[v].is_none() {
+                        let len = bond_length(g.z[u], g.z[v], 1, BondKind::Covalent);
+                        pos[v] = Some(pu + jitter_dir((u * 977 + k * 31 + v) as u64) * len);
+                        queue.push_back(v);
+                    }
+                }
+            }
+        }
+
+        let mut ids = Vec::with_capacity(n);
+        for (i, p) in pos.iter().enumerate() {
+            let z = g.z[i];
+            valid_z(z)?;
+            let protonated =
+                g.charge[i] > 0 && elements::can_protonate(z) && !category(z).is_metal();
+            let id = trial.alloc_atom(Atom {
+                z,
+                pos: p.unwrap_or(origin),
+                valence: element(z).valences.first().copied().unwrap_or(0),
+                protonated,
+                bonds: Vec::new(),
+                domains: Vec::new(),
+                vel: Vec3::ZERO,
+            });
+            ids.push(id);
+        }
+        for e in &g.edges {
+            let (a, b) = (ids[e.a], ids[e.b]);
+            let kind = pair_kind(g.z[e.a], g.z[e.b])?;
+            trial
+                .alloc_bond(a, b, kind)
+                .ok_or_else(|| Reject("Couldn't create a bond.".into()))?;
+        }
+        // Each atom takes the smallest valence that covers the bond orders in
+        // the source structure (so S in H2SO4 gets 6, not 4).
+        let mut order_sum = vec![0u8; n];
+        for e in &g.edges {
+            order_sum[e.a] = order_sum[e.a].saturating_add(e.order);
+            order_sum[e.b] = order_sum[e.b].saturating_add(e.order);
+        }
+        for (i, &id) in ids.iter().enumerate() {
+            let (z, protonated) = match trial.atom(id) {
+                Some(a) => (a.z, a.protonated as u8),
+                None => continue,
+            };
+            let need = order_sum[i].max(trial.sigma(id)).saturating_sub(protonated);
+            let Some(v) = smallest_valence_at_least(z, need) else {
+                return reject(format!("{} can't form {} bonds.", element(z).name, need));
+            };
+            if let Some(a) = trial.atom_mut(id) {
+                a.valence = v;
+            }
+        }
+        trial.after_change(&ids);
+        *self = trial;
+        Ok(ids)
+    }
+
     pub fn remove_atom(&mut self, id: AtomId) {
         let Some(atom) = self.atom(id).cloned() else {
             return;
@@ -1325,6 +1417,51 @@ mod tests {
         assert_eq!(open(&lab, c0), 0);
         let doubles = lab.bonds().filter(|(_, b)| b.order == 2).count();
         assert_eq!(doubles, 3);
+    }
+
+    #[test]
+    fn add_molecule_matches_hand_built() {
+        use crate::canon::structure_hash;
+        use crate::smiles::parse;
+        for smi in [
+            "CCO",
+            "O=C=O",
+            "[Na]Cl",
+            "OS(=O)(=O)O",
+            "C1=CC=CC=C1",
+            "[NH4+]",
+            "O=C1O[Ca]O1",
+            "O=[Fe]O[Fe]=O",
+        ] {
+            let mut lab = Lab::new();
+            let ids = lab.add_molecule(&parse(smi).unwrap(), Vec3::ZERO).unwrap();
+            lab.validate().unwrap();
+            let comp = lab.component(ids[0]);
+            assert_eq!(comp.len(), ids.len(), "{smi} should be one molecule");
+            let g = lab.graph(&comp);
+            assert!(
+                g.is_complete(),
+                "{smi} should be complete, got {} open",
+                g.total_free()
+            );
+            // Round trip: same structure as a covalent parse where applicable.
+            if !g.has_ionic() {
+                assert_eq!(
+                    structure_hash(&g),
+                    structure_hash(&parse(smi).unwrap()),
+                    "{smi}"
+                );
+            }
+        }
+        // Impossible structures are rejected and leave the lab untouched.
+        let mut lab = Lab::new();
+        let rev = lab.revision();
+        assert!(
+            lab.add_molecule(&parse("[Ne]C").unwrap(), Vec3::ZERO)
+                .is_err()
+        );
+        assert_eq!(lab.revision(), rev);
+        assert!(lab.is_empty());
     }
 
     #[test]

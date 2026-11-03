@@ -13,7 +13,7 @@ use valence_chem::{AtomId, BondId, BondKind, lab::atom_radius};
 use crate::camera::OrbitCam;
 use crate::palette::{self, ANION, CATION, OPEN_SITE};
 use crate::quality::{GraphicsQuality, Quality, Startup};
-use crate::state::{Chem, Drag, Pointer, Settings};
+use crate::state::{Chem, Drag, Isolation, Pointer, Settings};
 
 #[derive(Resource)]
 pub struct SceneAssets {
@@ -503,4 +503,45 @@ pub fn step_physics(mut chem: ResMut<Chem>, drag: Res<Drag>) {
         _ => None,
     };
     chem.relax(3, pinned);
+}
+
+/// Hide everything not in the current `Isolation` (used while exporting one
+/// molecule or a reaction). Runs only while isolating or just after.
+pub fn apply_isolation(
+    isolation: Res<Isolation>,
+    mut atoms: Query<(&AtomVis, &mut Visibility)>,
+    mut bonds: Query<(&BondVis, &mut Visibility), Without<AtomVis>>,
+    mut dots: Query<(&DotVis, &mut Visibility), (Without<AtomVis>, Without<BondVis>)>,
+    mut halos: Query<
+        (&HaloVis, &mut Visibility),
+        (Without<AtomVis>, Without<BondVis>, Without<DotVis>),
+    >,
+) {
+    if !isolation.is_changed() && isolation.0.is_none() {
+        return;
+    }
+    let vis = |show: bool| {
+        if show {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    };
+    let set = |v: &mut Visibility, want: Visibility| {
+        if *v != want {
+            *v = want;
+        }
+    };
+    for (a, mut v) in &mut atoms {
+        set(&mut v, vis(isolation.shows(a.id)));
+    }
+    for (b, mut v) in &mut bonds {
+        set(&mut v, vis(isolation.shows(b.a)));
+    }
+    for (d, mut v) in &mut dots {
+        set(&mut v, vis(isolation.shows(d.atom)));
+    }
+    for (h, mut v) in &mut halos {
+        set(&mut v, vis(isolation.shows(h.atom)));
+    }
 }

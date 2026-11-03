@@ -12,7 +12,7 @@ use crate::quality::{GraphicsQuality, Quality, Startup};
 use crate::state::{Chem, Drag, Pointer};
 use bevy_egui::input::EguiWantsInput;
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct OrbitCam {
     pub focus: Vec3,
     pub yaw: f32,

@@ -304,3 +304,68 @@ mod tests {
         ));
     }
 }
+
+/// Sidebar tab.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Tab {
+    #[default]
+    Build,
+    Export,
+    Reactions,
+}
+
+/// What an image export captures.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum ExportTarget {
+    /// Everything in the 3D view.
+    #[default]
+    Lab,
+    /// Just the selected molecule, framed and isolated.
+    Molecule,
+    /// The molecules in the reaction, with the equation.
+    Reaction,
+}
+
+/// Window/tab state for the interface.
+#[derive(Resource)]
+pub struct UiState {
+    pub tab: Tab,
+    pub settings_open: bool,
+    pub help_open: bool,
+    pub about_open: bool,
+    pub quit_requested: bool,
+    pub export_target: ExportTarget,
+    /// Draw element symbols and name tags in exported images.
+    pub export_labels: bool,
+    /// Draw the details card (name, formula, mass, energy, …) in exports.
+    pub export_details: bool,
+    /// Draw the reaction diagram (+, arrow, captions) over the 3D view.
+    pub show_reaction_diagram: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            tab: Tab::Build,
+            settings_open: false,
+            help_open: false,
+            about_open: false,
+            quit_requested: false,
+            export_target: ExportTarget::Lab,
+            export_labels: true,
+            export_details: true,
+            show_reaction_diagram: true,
+        }
+    }
+}
+
+/// Which atoms are visible (everything when `None`). Used to isolate one
+/// molecule or a reaction while exporting an image.
+#[derive(Resource, Default)]
+pub struct Isolation(pub Option<std::collections::HashSet<AtomId>>);
+
+impl Isolation {
+    pub fn shows(&self, atom: AtomId) -> bool {
+        self.0.as_ref().is_none_or(|s| s.contains(&atom))
+    }
+}
