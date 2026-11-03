@@ -50,6 +50,8 @@ for s in 16 32 128 256 512; do
   sips -z "$d" "$d" "$ROOT/assets/icon/icon-mac-1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Valence.icns"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
+cp "$ROOT/assets/fonts/LICENSE-DejaVu.txt" "$APP/Contents/Resources/"
 
 TS=()
 [ "$IDENTITY" != "-" ] && TS=(--timestamp)

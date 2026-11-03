@@ -266,4 +266,11 @@ and for telling exothermic from endothermic, but not lab-precise.
 Architecture, the stability design, platform notes and the test tools are in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Fonts: DejaVu Sans (see `assets/fonts/LICENSE-DejaVu.txt`).
+## License
+
+Valence is dedicated to the public domain under
+[CC0 1.0 Universal](LICENSE): use, copy, modify and share it for any purpose,
+no permission needed.
+
+The bundled DejaVu Sans fonts keep their own free licence
+(`assets/fonts/LICENSE-DejaVu.txt`).

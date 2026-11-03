@@ -9,6 +9,7 @@ edition = "2024"
 description = "Drag-and-drop 3D molecule builder"
 rust-version = "1.95"
 repository = "https://github.com/rallegretti/Valence"
+license = "CC0-1.0"
 
 [dependencies]
 valence_chem = { path = "crates/chem", features = ["serde"] }

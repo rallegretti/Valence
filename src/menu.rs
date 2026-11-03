@@ -310,7 +310,7 @@ pub fn about_window(ctx: &egui::Context, state: &mut UiState) {
         ui.label("Build molecules from the periodic table under simplified real bonding rules.");
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Built with Bevy and egui. Fonts: DejaVu Sans.")
+            RichText::new("Public domain (CC0 1.0). Built with Bevy and egui. Fonts: DejaVu Sans.")
                 .size(12.0)
                 .color(MUTED),
         );

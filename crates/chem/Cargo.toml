@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Engine-independent chemistry core: elements, bonding rules, naming, layout"
 rust-version = "1.88"
+license = "CC0-1.0"
 
 [dependencies]
 glam = "0.33"

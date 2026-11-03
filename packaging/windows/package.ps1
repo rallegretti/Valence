@@ -24,6 +24,7 @@ Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $Folder -Force | Out-Null
 New-Item -ItemType Directory $Dist -Force | Out-Null
 Copy-Item "target\dist\valence.exe" (Join-Path $Folder "Valence.exe")
+Copy-Item "LICENSE" (Join-Path $Folder "LICENSE.txt")
 Copy-Item "assets\fonts\LICENSE-DejaVu.txt" $Folder
 
 $Zip = Join-Path $Dist "Valence-$Version-windows-x86_64.zip"

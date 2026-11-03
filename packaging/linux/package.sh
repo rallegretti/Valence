@@ -58,7 +58,24 @@ strip "$STAGE/usr/bin/valence"
 install -Dm644 "$HERE/$ID.desktop" "$STAGE/usr/share/applications/$ID.desktop"
 mkdir -p "$STAGE/usr/share/icons"
 cp -R "$ROOT/assets/icon/hicolor" "$STAGE/usr/share/icons/"
+install -Dm644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/valence/LICENSE"
 install -Dm644 "$ROOT/assets/fonts/LICENSE-DejaVu.txt" "$STAGE/usr/share/doc/valence/LICENSE-DejaVu.txt"
+# Debian-style copyright summary.
+cat >"$STAGE/usr/share/doc/valence/copyright" <<COPYRIGHT
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Valence
+Source: https://github.com/rallegretti/Valence
+
+Files: *
+Copyright: Rob Allegretti
+License: CC0-1.0
+ See /usr/share/common-licenses/CC0-1.0 (also /usr/share/doc/valence/LICENSE).
+
+Files: fonts (DejaVu Sans, embedded in the binary)
+Copyright: Bitstream, Inc.; DejaVu changes are in the public domain
+License: Bitstream-Vera
+ See /usr/share/doc/valence/LICENSE-DejaVu.txt.
+COPYRIGHT
 install -Dm644 "$ROOT/README.md" "$STAGE/usr/share/doc/valence/README.md"
 command -v desktop-file-validate >/dev/null && desktop-file-validate "$STAGE/usr/share/applications/$ID.desktop"
 
