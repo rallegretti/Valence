@@ -4,7 +4,8 @@
 //!   an atom → try to bond to it.
 //! - Drag an atom in the scene: moves its whole molecule; drop it onto
 //!   another atom to bond them (joins molecules or closes a ring).
-//! - Right-click (no drag) or Delete/Backspace on an atom removes it.
+//! - Right-click (no drag) or Delete/Backspace on an atom removes it; if
+//!   it's bonded to others, a prompt asks: just the atom, or the molecule?
 //! - Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo.
 
 use bevy::{prelude::*, window::PrimaryWindow};
@@ -172,6 +173,7 @@ pub fn handle_mouse(
     mut selection: ResMut<Selection>,
     mut right_press: Local<Option<(Vec2, Option<AtomId>)>>,
     mut empty_press: Local<Option<Vec2>>,
+    view: Res<ViewRect>,
 ) {
     let (rig, cam_t) = *camera;
     let now = time.elapsed_secs_f64();
@@ -276,16 +278,73 @@ pub fn handle_mouse(
             && pos.distance(at) < DRAG_THRESHOLD
             && pointer.hovered_atom == Some(atom)
         {
-            delete_atom(&mut chem, &mut effects, &mut selection, atom, now);
+            request_delete(&mut chem, &mut effects, &mut selection, atom, pos, now);
         }
         *right_press = None;
     }
     if keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace])
         && !egui.wants_keyboard_input()
         && *drag == Drag::None
+        && selection.delete_ask.is_none()
         && let Some(atom) = pointer.hovered_atom.or(selection.atom)
     {
-        delete_atom(&mut chem, &mut effects, &mut selection, atom, now);
+        let at = pointer
+            .pos
+            .filter(|_| pointer.hovered_atom.is_some())
+            .unwrap_or_else(|| view.0.center());
+        request_delete(&mut chem, &mut effects, &mut selection, atom, at, now);
+    }
+}
+
+/// Remove an atom. If it's bonded to others, ask first whether to remove
+/// just it or its whole molecule (so stray fragments aren't left behind).
+pub fn request_delete(
+    chem: &mut Chem,
+    effects: &mut Effects,
+    selection: &mut Selection,
+    atom: AtomId,
+    at: Vec2,
+    now: f64,
+) {
+    if chem.lab.atom(atom).is_none() {
+        return;
+    }
+    if chem.lab.neighbors(atom).next().is_none() {
+        delete_atom(chem, effects, selection, atom, now);
+    } else {
+        selection.delete_ask = Some((atom, at));
+    }
+}
+
+/// Remove every atom of the molecule containing `atom` (one undo step).
+pub fn delete_molecule(
+    chem: &mut Chem,
+    effects: &mut Effects,
+    selection: &mut Selection,
+    atom: AtomId,
+    now: f64,
+) {
+    let ids = chem.lab.component(atom);
+    let pts: Vec<Vec3> = ids
+        .iter()
+        .filter_map(|&id| chem.lab.atom(id).map(|a| a.pos))
+        .collect();
+    if pts.is_empty() {
+        return;
+    }
+    let pos = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+    let name = chem
+        .molecule_of(atom)
+        .map_or_else(|| "molecule".to_string(), |m| m.names.title.clone());
+    let edit = chem.edit("remove molecule", |lab| {
+        for &id in &ids {
+            lab.remove_atom(id);
+        }
+        Ok(())
+    });
+    effects.report(&edit, pos, &format!("Removed {name}"), now);
+    if selection.atom.is_some_and(|a| ids.contains(&a)) {
+        selection.atom = None;
     }
 }
 
@@ -308,5 +367,43 @@ pub fn delete_atom(
     effects.report(&edit, pos, &format!("Removed {name}"), now);
     if selection.atom == Some(atom) {
         selection.atom = neighbor;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_asks_for_bonded_atoms_only() {
+        let mut chem = Chem::default();
+        let mut effects = Effects::default();
+        let mut sel = Selection::default();
+        let g = valence_chem::smiles::parse("O").unwrap();
+        let Edit::Done(water) = chem.edit("t", |lab| lab.add_molecule(&g, Vec3::ZERO)) else {
+            panic!("water")
+        };
+        let Edit::Done(lone) = chem.edit("t", |lab| lab.add_atom(10, Vec3::X * 10.0)) else {
+            panic!("neon")
+        };
+        chem.refresh();
+
+        // A lone atom goes straight away.
+        request_delete(&mut chem, &mut effects, &mut sel, lone, Vec2::ZERO, 0.0);
+        assert!(chem.lab.atom(lone).is_none());
+        assert!(sel.delete_ask.is_none());
+
+        // A bonded atom asks first and changes nothing yet.
+        request_delete(&mut chem, &mut effects, &mut sel, water[0], Vec2::ONE, 0.0);
+        assert_eq!(sel.delete_ask, Some((water[0], Vec2::ONE)));
+        assert_eq!(chem.lab.atoms().count(), 3);
+
+        // "Whole molecule" removes it all in one undoable step.
+        sel.atom = Some(water[1]);
+        delete_molecule(&mut chem, &mut effects, &mut sel, water[0], 0.0);
+        assert_eq!(chem.lab.atoms().count(), 0);
+        assert!(sel.atom.is_none());
+        assert!(chem.undo());
+        assert_eq!(chem.lab.atoms().count(), 3);
     }
 }

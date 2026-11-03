@@ -209,6 +209,9 @@ pub struct Selection {
     pub atom: Option<AtomId>,
     /// Element hovered in the periodic table.
     pub element: Option<u8>,
+    /// "Remove just this atom or the whole molecule?" prompt: the atom and
+    /// where to show the prompt (logical window coordinates).
+    pub delete_ask: Option<(AtomId, Vec2)>,
 }
 
 /// Logical-pixel rectangle of the 3D viewport (right of the panel).

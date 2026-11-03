@@ -106,6 +106,15 @@ pub fn menu_button(
                 ui.close();
             }
             if ui
+                .add_enabled(has_sel, egui::Button::new("Delete selected molecule"))
+                .clicked()
+            {
+                if let Some(a) = selection.atom {
+                    crate::interact::delete_molecule(chem, effects, selection, a, now);
+                }
+                ui.close();
+            }
+            if ui
                 .add_enabled(has_sel, egui::Button::new("Select none"))
                 .clicked()
             {
@@ -258,7 +267,7 @@ pub fn help_window(ctx: &egui::Context, state: &mut UiState) {
             ("Scroll or pinch", "Zoom"),
             (
                 "Right-click, Delete or Backspace",
-                "Remove the atom under the mouse (or the selected one)",
+                "Remove the atom under the mouse (or the selected one); for a bonded atom, choose the atom (A) or its whole molecule (M)",
             ),
             ("Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z", "Undo / redo"),
             ("F", "Frame everything"),

@@ -171,7 +171,7 @@ saved in your **Pictures/Valence** folder.
 
 The **☰** button next to the title holds the menus:
 - **File:** new lab, open / save lab data, example shelf, export, quit
-- **Edit:** undo, redo, delete
+- **Edit:** undo, redo, delete an atom or a whole molecule
 - **Settings**
 - **Help:** a controls cheat-sheet
 
@@ -196,7 +196,7 @@ The **☰** button next to the title holds the menus:
 | Rotate the view | Drag empty space, or right-drag |
 | Pan the view | **Shift** + drag empty space, or middle-drag |
 | Zoom | Scroll, or pinch on a trackpad |
-| Remove an atom | Right-click it, or select it and press **Delete** / **Backspace** |
+| Remove an atom or molecule | Right-click it, or select it and press **Delete** / **Backspace**. If the atom is bonded to others, choose **Just this atom** (**A**) or **Whole molecule** (**M**) |
 | Undo / redo | **Ctrl/Cmd + Z** / **Ctrl/Cmd + Shift + Z** |
 | Save lab data / save as | **Ctrl/Cmd + S** / **Ctrl/Cmd + Shift + S** |
 | Open lab data | **Ctrl/Cmd + O** |

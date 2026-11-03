@@ -317,6 +317,7 @@ pub fn ui_system(
     crate::menu::settings_window(&ctx, &mut state, &mut quality, adapter.as_deref());
     crate::menu::help_window(&ctx, &mut state);
     crate::menu::about_window(&ctx, &mut state);
+    delete_prompt(&ctx, &mut chem, &mut effects, &mut selection, now);
 
     // 3D view = the area between the periodic table and the Library.
     let scale = window.scale_factor();
@@ -387,6 +388,114 @@ pub fn ui_system(
         &mut scene,
     );
     Ok(())
+}
+
+/// "Remove just this atom or its whole molecule?", shown by the cursor.
+fn delete_prompt(
+    ctx: &egui::Context,
+    chem: &mut Chem,
+    effects: &mut Effects,
+    selection: &mut Selection,
+    now: f64,
+) {
+    let Some((atom, at)) = selection.delete_ask else {
+        return;
+    };
+    let Some(z) = chem.lab.atom(atom).map(|a| a.z) else {
+        selection.delete_ask = None; // gone (e.g. undone)
+        return;
+    };
+    let element_name = element(z).name;
+    let (mol_name, count) = chem.molecule_of(atom).map_or_else(
+        || ("its molecule".to_string(), chem.lab.component(atom).len()),
+        |m| (m.names.title.clone(), m.atoms.len()),
+    );
+    #[derive(Clone, Copy)]
+    enum Choice {
+        Cancel,
+        Atom,
+        Molecule,
+    }
+    let mut choice = None;
+    let area = egui::Area::new("delete_ask".into())
+        .order(Order::Foreground)
+        .fixed_pos(pos2(at.x + 10.0, at.y + 10.0))
+        .constrain(true)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(250.0);
+                ui.label(
+                    RichText::new(format!("Remove {element_name}?"))
+                        .strong()
+                        .size(15.0)
+                        .color(Color32::WHITE),
+                );
+                ui.label(
+                    RichText::new(format!("It's part of {mol_name}."))
+                        .size(12.0)
+                        .color(MUTED),
+                );
+                ui.add_space(4.0);
+                let w = ui.available_width();
+                let button = |text: String, key: &str| {
+                    egui::Button::new(text)
+                        .shortcut_text(key)
+                        .min_size(vec2(w, 26.0))
+                };
+                if ui
+                    .add(button(
+                        format!("Just this {} atom", element_name.to_lowercase()),
+                        "A",
+                    ))
+                    .clicked()
+                {
+                    choice = Some(Choice::Atom);
+                }
+                if ui
+                    .add(button(format!("Whole molecule ({count} atoms)"), "M"))
+                    .clicked()
+                {
+                    choice = Some(Choice::Molecule);
+                }
+                if ui.add(button("Cancel".into(), "Esc")).clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+    if choice.is_none() {
+        let typing = ctx.egui_wants_keyboard_input();
+        choice = ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                Some(Choice::Cancel)
+            } else if !typing && i.key_pressed(egui::Key::A) {
+                Some(Choice::Atom)
+            } else if !typing && i.key_pressed(egui::Key::M) {
+                Some(Choice::Molecule)
+            } else if i.pointer.any_pressed()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !area.response.rect.contains(p))
+            {
+                // Clicking anywhere else dismisses it.
+                Some(Choice::Cancel)
+            } else {
+                None
+            }
+        });
+    }
+    match choice {
+        None => {}
+        Some(c) => {
+            selection.delete_ask = None;
+            match c {
+                Choice::Cancel => {}
+                Choice::Atom => crate::interact::delete_atom(chem, effects, selection, atom, now),
+                Choice::Molecule => {
+                    crate::interact::delete_molecule(chem, effects, selection, atom, now)
+                }
+            }
+        }
+    }
 }
 
 /// Shift the 3D projection so the scene is centred in the area between the
