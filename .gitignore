@@ -1,1 +1,33 @@
-target/
+# Rust build output (Cargo.lock IS committed: this is an application)
+/target/
+**/*.rs.bk
+*.pdb
+
+# Profiling / coverage
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg
+
+# Images written by local test runs (exports default to ~/Pictures/Valence)
+/valence-*.png
+
+# Editors and IDEs
+.idea/
+*.iml
+.vscode/
+.fleet/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# Local tool state and secrets
+.claude/
+.env
+.env.*
