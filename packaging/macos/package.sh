@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build Valence.app as one universal (Apple Silicon + Intel) app, sign it,
-# optionally notarize it, and zip it:
+# optionally notarize it, and put it on a drag-to-Applications disk image:
 #
-#   dist/Valence-<version>-macos-universal.zip
+#   dist/Valence-<version>-macos-universal.dmg
 #
 # Run on a Mac with Xcode (or its command line tools) and both Rust targets:
 #   rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -12,7 +12,8 @@
 #   MACOS_SIGN_IDENTITY   codesign identity, e.g. "Developer ID Application: Name (TEAMID)".
 #                         Default "-" (ad hoc: fine for local testing, not for release).
 #   NOTARY_PROFILE        notarytool keychain profile (xcrun notarytool store-credentials).
-#                         When set, the app is notarized and the ticket stapled.
+#                         When set, the app and the disk image are notarized and
+#                         their tickets stapled.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/packaging/macos"
@@ -56,17 +57,37 @@ codesign --force --options runtime ${TS[@]+"${TS[@]}"} --entitlements "$HERE/ent
   --sign "$IDENTITY" "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 
-ZIP="$DIST/Valence-$VERSION-macos-universal.zip"
+notarize() { # <file to submit>
+  xcrun notarytool submit "$1" --keychain-profile "$NOTARY_PROFILE" --wait
+}
 if [ -n "${NOTARY_PROFILE:-}" ]; then
   ditto -c -k --keepParent "$APP" "$WORK/notarize.zip"
-  xcrun notarytool submit "$WORK/notarize.zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  notarize "$WORK/notarize.zip"
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   spctl --assess --type execute --verbose=2 "$APP"
 else
-  echo "note: NOTARY_PROFILE not set, so the app is not notarized"
+  echo "note: NOTARY_PROFILE not set, so nothing is notarized"
 fi
-rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
-echo "wrote $ZIP"
-ls -lh "$ZIP"
+
+# Disk image: the app plus an Applications shortcut to drag it onto.
+DMG="$DIST/Valence-$VERSION-macos-universal.dmg"
+STAGE="$WORK/dmg"
+mkdir -p "$STAGE"
+ditto "$APP" "$STAGE/Valence.app"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+hdiutil create -volname "Valence" -srcfolder "$STAGE" -fs HFS+ -format UDZO \
+  -imagekey zlib-level=9 -ov "$DMG" >/dev/null
+if [ "$IDENTITY" != "-" ]; then
+  codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+  codesign --verify --strict --verbose=2 "$DMG"
+fi
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+  notarize "$DMG"
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+fi
+echo "wrote $DMG"
+ls -lh "$DMG"

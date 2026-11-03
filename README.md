@@ -46,7 +46,7 @@ installing: no .NET, Java or other runtimes.
 | Your system | Download | Then |
 |---|---|---|
 | **Windows** 10 or 11 | `Valence-…-windows-x86_64.zip` | Unzip it and run **Valence.exe** (see the heads-up below) |
-| **macOS** 11 or later (Apple Silicon and Intel) | `Valence-…-macos-universal.zip` | Unzip it and drag **Valence** to Applications |
+| **macOS** 11 or later (Apple Silicon and Intel) | `Valence-…-macos-universal.dmg` | Open it and drag **Valence** onto **Applications** |
 | **Ubuntu, Debian, Mint, Pop!_OS** | `valence_…_amd64.deb` | Double-click to install, or `sudo apt install ./valence_…_amd64.deb`; Valence then appears in your apps menu |
 | **Other Linux** | `Valence-…-x86_64.AppImage` | Make it executable (file properties, or `chmod +x Valence-*.AppImage`) and run it |
 

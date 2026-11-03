@@ -236,7 +236,7 @@ Bump `version` in `Cargo.toml` first. Each script writes to `dist/`.
 | Platform | Run on | Command | Output |
 |---|---|---|---|
 | Linux | Linux with Docker | `packaging/linux/package.sh` | `valence_<v>_amd64.deb`, `Valence-<v>-x86_64.AppImage` |
-| macOS | a Mac | `packaging/macos/package.sh` | `Valence-<v>-macos-universal.zip` |
+| macOS | a Mac | `packaging/macos/package.sh` | `Valence-<v>-macos-universal.dmg` |
 | Windows | Windows | `.\packaging\windows\package.ps1` | `Valence-<v>-windows-x86_64.zip` |
 
 - **Linux** builds inside an Ubuntu 22.04 container (`packaging/linux/Dockerfile`),
@@ -245,7 +245,8 @@ Bump `version` in `Cargo.toml` first. Each script writes to `dist/`.
 - **macOS** builds both architectures and joins them with `lipo` into one
   universal `Valence.app`. Set `MACOS_SIGN_IDENTITY` to the Developer ID
   Application identity and `NOTARY_PROFILE` to a `notarytool` keychain
-  profile to sign, notarize and staple it; otherwise it's signed ad hoc. Run
+  profile to sign, notarize and staple both the app and the disk image;
+  otherwise it's signed ad hoc and nothing is notarized. Run
   it in a Terminal on the Mac itself: over SSH the login keychain is locked,
   and `codesign` fails with `errSecInternalComponent`.
 - **Windows** embeds the icon (`assets/icon/valence.ico`) through `build.rs`.
