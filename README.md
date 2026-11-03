@@ -5,8 +5,7 @@
 Valence is an educational app for experimenting with atoms and molecules.
 Drag elements out of the periodic table, drop them onto each other, and watch
 real bonding rules decide what can join. Each molecule gets its proper
-name, its 3D shape, and the facts that go with it. There's no score and no
-levels: it's a sandbox for curiosity.
+name, its 3D shape, and the facts that go with it.
 
 <p align="center">
   <img src="docs/screenshots/caffeine.gif" alt="A caffeine molecule slowly spinning in 3D, with every atom labelled" width="400">
