@@ -12,10 +12,13 @@ use valence_chem::{AtomId, BondId, BondKind, lab::atom_radius};
 
 use crate::camera::OrbitCam;
 use crate::palette::{self, ANION, CATION, OPEN_SITE};
+use crate::quality::{GraphicsQuality, Quality, Startup};
 use crate::state::{Chem, Drag, Pointer, Settings};
 
 #[derive(Resource)]
 pub struct SceneAssets {
+    /// Lite graphics: no translucent halos (the UI draws ion rings instead).
+    lite: bool,
     sphere: Handle<Mesh>,
     tube: Handle<Mesh>,
     dot: Handle<Mesh>,
@@ -78,7 +81,9 @@ pub fn setup_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    quality: Res<GraphicsQuality>,
 ) {
+    let lite = quality.active == Quality::Lite;
     // ico() only fails above 80 subdivisions; fall back to a UV sphere anyway.
     let sphere = meshes.add(
         Sphere::new(1.0)
@@ -100,24 +105,42 @@ pub fn setup_assets(
         perceptual_roughness: 0.45,
         ..default()
     });
-    let ionic = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.95, 0.95, 1.0, 0.55),
-        emissive: LinearRgba::rgb(0.25, 0.25, 0.35),
-        alpha_mode: AlphaMode::Blend,
-        ..default()
+    // Lite: every material is opaque + lit (the same shader variant as the
+    // atoms), with emissive standing in for glow and transparency.
+    let ionic = mats.add(if lite {
+        StandardMaterial {
+            base_color: Color::srgb(0.8, 0.8, 0.88),
+            emissive: LinearRgba::rgb(0.25, 0.25, 0.32),
+            ..default()
+        }
+    } else {
+        StandardMaterial {
+            base_color: Color::srgba(0.95, 0.95, 1.0, 0.55),
+            emissive: LinearRgba::rgb(0.25, 0.25, 0.35),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }
     });
     let open_site = mats.add(StandardMaterial {
         base_color: srgb(OPEN_SITE),
-        emissive: glow(OPEN_SITE, 6.0),
-        unlit: true,
+        emissive: glow(OPEN_SITE, if lite { 1.5 } else { 6.0 }),
+        unlit: !lite,
         ..default()
     });
-    let lone_pair = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.75, 0.85, 1.0, 0.55),
-        emissive: LinearRgba::rgb(0.3, 0.35, 0.45),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
+    let lone_pair = mats.add(if lite {
+        StandardMaterial {
+            base_color: Color::srgb(0.6, 0.68, 0.82),
+            emissive: LinearRgba::rgb(0.2, 0.24, 0.32),
+            ..default()
+        }
+    } else {
+        StandardMaterial {
+            base_color: Color::srgba(0.75, 0.85, 1.0, 0.55),
+            emissive: LinearRgba::rgb(0.3, 0.35, 0.45),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        }
     });
     let halo = |c: palette::Rgb| StandardMaterial {
         base_color: Color::srgba(c[0], c[1], c[2], 0.22),
@@ -149,6 +172,7 @@ pub fn setup_assets(
         elements_hot.push(mats.add(hot));
     }
     commands.insert_resource(SceneAssets {
+        lite,
         sphere,
         tube,
         dot,
@@ -170,9 +194,14 @@ pub fn sync_structure(
     settings: Res<Settings>,
     assets: Res<SceneAssets>,
     mut vis: ResMut<VisState>,
+    startup: Res<Startup>,
     old: Query<Entity, Or<(With<BondVis>, With<DotVis>, With<HaloVis>)>>,
 ) {
     chem.refresh();
+    // The 3D scene is only built once the interface has been drawn.
+    if !startup.scene_allowed() {
+        return;
+    }
     let lab = &chem.lab;
     if vis.rev == lab.revision() && vis.lone_pairs == settings.show_lone_pairs {
         return;
@@ -303,7 +332,7 @@ pub fn sync_structure(
             }
         }
         let q = lab.charge(id);
-        if q != 0 {
+        if q != 0 && !assets.lite {
             let Some(z) = lab.atom(id).map(|a| a.z) else {
                 continue;
             };

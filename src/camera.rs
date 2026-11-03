@@ -8,6 +8,7 @@ use bevy::{
     prelude::*,
 };
 
+use crate::quality::{GraphicsQuality, Quality, Startup};
 use crate::state::{Chem, Drag, Pointer};
 use bevy_egui::input::EguiWantsInput;
 
@@ -66,11 +67,9 @@ pub fn spawn_camera(mut commands: Commands) {
             clear_color: ClearColorConfig::Custom(Color::srgb(0.035, 0.04, 0.06)),
             ..default()
         },
-        Tonemapping::TonyMcMapface,
-        Bloom {
-            intensity: 0.12,
-            ..Bloom::NATURAL
-        },
+        // Post-processing is added with the 3D scene (Full only), so the
+        // interface's shaders compile first and alone.
+        Tonemapping::None,
         rig.transform(),
         rig,
     ));
@@ -94,6 +93,30 @@ pub fn spawn_camera(mut commands: Commands) {
         brightness: 350.0,
         ..default()
     });
+}
+
+/// When the 3D scene is built, give Full quality its film tone mapping and
+/// bloom glow. Lite keeps neither (fewer shaders to compile).
+pub fn apply_full_look(
+    mut commands: Commands,
+    camera: Single<Entity, With<OrbitCam>>,
+    startup: Res<Startup>,
+    quality: Res<GraphicsQuality>,
+    mut done: Local<bool>,
+) {
+    if *done || !startup.scene_allowed() {
+        return;
+    }
+    *done = true;
+    if quality.active == Quality::Full {
+        commands.entity(*camera).insert((
+            Tonemapping::TonyMcMapface,
+            Bloom {
+                intensity: 0.12,
+                ..Bloom::NATURAL
+            },
+        ));
+    }
 }
 
 pub fn orbit_controls(

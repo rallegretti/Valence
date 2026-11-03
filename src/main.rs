@@ -22,47 +22,73 @@
 mod camera;
 mod crash;
 mod debug;
+mod gpu;
 mod interact;
 mod palette;
+mod quality;
 mod scene;
+mod settings_file;
 mod state;
 mod ui;
 
 use bevy::{
     camera::{CameraOutputMode, visibility::RenderLayers},
+    pbr::PbrPlugin,
     prelude::*,
-    render::render_resource::BlendState,
+    render::{RenderPlugin, render_resource::BlendState},
     window::{WindowResizeConstraints, WindowResolution},
     winit::{UpdateMode, WinitSettings},
 };
 use bevy_egui::{EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
 use std::time::Duration;
 
-fn main() {
+/// Returning `AppExit` makes the process exit code reflect how the app ended
+/// (the smoke test relies on this).
+fn main() -> AppExit {
     crash::install_panic_hook();
+    let backends = gpu::choose_backends();
+    let quality = quality::resolve(backends);
 
     App::new()
         // A failing system logs a warning instead of taking the game down.
         .set_error_handler(bevy::ecs::error::warn)
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Valence: build molecules".into(),
-                resolution: WindowResolution::new(1600, 960),
-                resize_constraints: WindowResizeConstraints {
-                    min_width: 720.0,
-                    min_height: 480.0,
+        .add_plugins(
+            DefaultPlugins
+                .set(RenderPlugin {
+                    render_creation: gpu::render_creation(backends),
                     ..default()
-                },
-                ..default()
-            }),
-            ..default()
-        }))
+                })
+                // Skip pipelines for rendering features we don't use (depth
+                // prepass, deferred lighting): less start-up shader work, same
+                // look. NB: keep GPU mesh preprocessing on; turning it off
+                // stops opaque meshes drawing in Bevy 0.20.
+                .set(PbrPlugin {
+                    prepass_enabled: false,
+                    add_default_deferred_lighting_plugin: false,
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Valence: build molecules".into(),
+                        resolution: WindowResolution::new(1600, 960),
+                        resize_constraints: WindowResizeConstraints {
+                            min_width: 720.0,
+                            min_height: 480.0,
+                            ..default()
+                        },
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         // Full frame rate while focused; throttle to ~10 fps in the background.
         .insert_resource(WinitSettings {
             focused_mode: UpdateMode::Continuous,
             unfocused_mode: UpdateMode::reactive_low_power(Duration::from_millis(100)),
         })
         .add_plugins(EguiPlugin::default())
+        .add_plugins(quality::StartupPlugin)
+        .insert_resource(quality)
         .add_plugins(debug::DebugPlugin)
         .init_resource::<state::Chem>()
         .init_resource::<state::Drag>()
@@ -87,6 +113,7 @@ fn main() {
                 interact::update_pointer,
                 interact::handle_keys,
                 camera::orbit_controls,
+                camera::apply_full_look,
                 interact::handle_mouse,
                 scene::step_physics,
                 scene::sync_structure,
@@ -94,7 +121,7 @@ fn main() {
             )
                 .chain(),
         )
-        .run();
+        .run()
 }
 
 /// egui gets its own camera so the 3D camera can be confined to the right

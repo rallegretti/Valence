@@ -2,14 +2,20 @@
 //!
 //! - `--demo`: start with a shelf of example molecules.
 //! - `VALENCE_SCREENSHOT=path.png`: save a screenshot after the layout
-//!   settles, then exit (used for automated visual checks).
+//!   settles and the game is visible (retrying for up to 90 s while e.g.
+//!   shaders compile), then exit: code 0 if the game showed up, 3 if every
+//!   frame was blank (e.g. locked screen), 4 if no screenshot arrived.
 //! - `VALENCE_WINDOW=w,h`: start with a specific window size.
 //! - `VALENCE_FAKE_DRAG=z,x,y`: pretend element `z` is being dragged with the
 //!   cursor at window position (x, y), to capture drop feedback in a screenshot.
 
 use bevy::{
     prelude::*,
-    render::view::screenshot::{Screenshot, save_to_disk},
+    render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk},
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
 };
 use valence_chem::{AtomId, Lab, Reject, Vec3 as V};
 
@@ -30,6 +36,11 @@ impl Plugin for DebugPlugin {
             app.add_systems(PostStartup, demo_scene);
         }
         if let Ok(path) = std::env::var("VALENCE_SCREENSHOT") {
+            // Hide text labels so the content check can see the 3D bonds.
+            app.add_systems(Startup, |mut s: ResMut<crate::state::Settings>| {
+                s.show_names = false;
+                s.show_symbols = false;
+            });
             app.insert_resource(ScreenshotPath(path))
                 .add_systems(Update, screenshot_then_exit);
         }
@@ -65,20 +76,147 @@ impl Plugin for DebugPlugin {
 #[derive(Resource)]
 struct ScreenshotPath(String);
 
+/// Smoke-test verdict, written by the screenshot observer (0 = pending).
+const DREW: u8 = 1;
+const BLANK: u8 = 2;
+
+/// Does the captured frame actually contain the game? Two checks:
+/// - the UI drew: plenty of bright pixels (text, table cells);
+/// - the 3D scene drew: white bond tubes in the 3D view (right of the panel).
+///   Labels are hidden in smoke-test mode so only bonds are near-white there.
+///   A locked screen, a hidden window or a broken render pass fails these.
+fn frame_has_content(captured: &ScreenshotCaptured) -> bool {
+    let img = &captured.image;
+    let Some(data) = img.data.as_ref() else {
+        return false;
+    };
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 || data.len() < w * h * 4 {
+        return false;
+    }
+    let px = data.as_chunks::<4>().0;
+    let bright = px.iter().filter(|p| p[0].max(p[1]).max(p[2]) > 180).count();
+    let view_left = w * 45 / 100;
+    let mut bond_white = 0usize;
+    for y in 0..h {
+        for p in &px[y * w + view_left..(y + 1) * w] {
+            let (mx, mn) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+            if mn > 170 && mx - mn < 30 {
+                bond_white += 1;
+            }
+        }
+    }
+    let view_px = (w - view_left) * h;
+    bright > 500 && bond_white * 10_000 > view_px * 8 // > 0.08% of the 3D view
+}
+
+/// Retry state for the smoke test.
+#[derive(Default)]
+struct SmokeTest {
+    next_shot: f64,
+    requested_at: Option<f64>,
+    attempts: u32,
+    ever_captured: bool,
+    first_visible: Option<f64>,
+}
+
+const FIRST_SHOT_SECS: f64 = 0.5;
+const SETTLED_SECS: f64 = 3.0; // final screenshot no earlier than this
+const RETRY_SECS: f64 = 1.0;
+const GIVE_UP_SECS: f64 = 150.0; // slow first-run shader compiles can take a while
+
+/// Screenshot the window until it shows the game (or give up), then exit.
+/// Time-based with retries, because the first visible frame can take many
+/// seconds on slow machines while shaders compile.
 fn screenshot_then_exit(
     mut commands: Commands,
     path: Res<ScreenshotPath>,
-    mut frame: Local<u32>,
+    time: Res<Time<Real>>,
+    startup: Res<crate::quality::Startup>,
+    quality: Res<crate::quality::GraphicsQuality>,
+    mut state: Local<SmokeTest>,
+    verdict: Local<Arc<AtomicU8>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    *frame += 1;
-    if *frame == 240 {
+    let now = time.elapsed_secs_f64();
+    if state.next_shot == 0.0 {
+        state.next_shot = FIRST_SHOT_SECS;
+    }
+
+    match verdict.swap(0, Ordering::SeqCst) {
+        DREW => {
+            if state.first_visible.is_none() {
+                state.first_visible = Some(now);
+                info!(
+                    "smoke test: game first visible {now:.1}s after launch (attempt {})",
+                    state.attempts
+                );
+            }
+            if now >= SETTLED_SECS {
+                info!(
+                    "smoke test: OK ({:?} graphics: {}; interface at {:.1}s, 3D scene ready {:.1}s after launch); screenshot: {}",
+                    quality.active,
+                    quality.reason,
+                    startup.ui_ready_at.unwrap_or(0.0),
+                    startup.scene_ready_at.unwrap_or(0.0),
+                    path.0
+                );
+                exit.write(AppExit::Success);
+                return;
+            }
+            state.requested_at = None;
+            state.next_shot = SETTLED_SECS;
+        }
+        BLANK => {
+            state.ever_captured = true;
+            state.requested_at = None;
+            state.next_shot = now + RETRY_SECS;
+        }
+        _ => {}
+    }
+    // A request that never comes back (window hidden, surface lost): retry.
+    if state.requested_at.is_some_and(|t| now - t > 10.0) {
+        state.requested_at = None;
+        state.next_shot = now;
+    }
+
+    if now > GIVE_UP_SECS {
+        if state.ever_captured {
+            error!(
+                "smoke test: every frame was blank for {GIVE_UP_SECS}s. Is the screen locked, asleep \
+                 or the window hidden? (screenshot: {})",
+                path.0
+            );
+            exit.write(AppExit::from_code(3));
+        } else {
+            error!("smoke test: no screenshot was captured in {GIVE_UP_SECS}s");
+            exit.write(AppExit::from_code(4));
+        }
+        return;
+    }
+
+    // Only judge the frame once the 3D scene has finished compiling.
+    if startup.phase != crate::quality::Phase::Ready {
+        state.next_shot = state.next_shot.max(now);
+        return;
+    }
+    if state.requested_at.is_none() && now >= state.next_shot {
+        state.requested_at = Some(now);
+        state.attempts += 1;
+        let v = verdict.clone();
         commands
             .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(path.0.clone()));
-    }
-    if *frame == 270 {
-        exit.write(AppExit::Success);
+            .observe(save_to_disk(path.0.clone()))
+            .observe(move |captured: On<ScreenshotCaptured>| {
+                v.store(
+                    if frame_has_content(&captured) {
+                        DREW
+                    } else {
+                        BLANK
+                    },
+                    Ordering::SeqCst,
+                );
+            });
     }
 }
 

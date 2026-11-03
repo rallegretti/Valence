@@ -22,6 +22,7 @@ use valence_chem::{
 
 use crate::camera::{OrbitCam, frame_all};
 use crate::palette::{self, ANION, BAD, CATION, GOOD, OPEN_SITE, to_egui};
+use crate::quality::{GraphicsQuality, Phase, Quality, QualitySetting, RenderStats, Startup};
 use crate::state::{Chem, Drag, Edit, Effects, Pointer, Selection, Settings, ViewRect};
 
 const PANEL_BG: Color32 = Color32::from_rgb(17, 19, 25);
@@ -36,6 +37,12 @@ fn bold(size: f32) -> FontId {
 /// the UI waits until this has run.
 #[derive(Resource, Default)]
 pub struct FontsReady(u8);
+
+impl FontsReady {
+    pub fn is_ready(&self) -> bool {
+        self.0 >= 3
+    }
+}
 
 pub fn setup_fonts(mut contexts: EguiContexts, mut ready: ResMut<FontsReady>) -> Result {
     if ready.0 > 0 {
@@ -85,10 +92,18 @@ pub fn ui_system(
     mut view: ResMut<ViewRect>,
     time: Res<Time>,
     ready: Res<FontsReady>,
+    mut quality: ResMut<GraphicsQuality>,
+    mut startup: ResMut<Startup>,
+    stats: Res<RenderStats>,
 ) -> Result {
     if ready.0 < 3 {
         return Ok(());
     }
+    let mut gfx = Gfx {
+        quality: &mut quality,
+        startup: &mut startup,
+        compiling: stats.compiling(),
+    };
     let ctx = contexts.ctx_mut()?.clone();
     chem.refresh();
     let (cam, cam_gt, rig) = &mut *camera;
@@ -124,6 +139,7 @@ pub fn ui_system(
                 rig,
                 &pointer,
                 time.elapsed_secs_f64(),
+                &mut gfx,
             );
         });
     let left = panel.response.rect.width();
@@ -166,8 +182,17 @@ pub fn ui_system(
         &mut effects,
         view.0,
         time.elapsed_secs_f64(),
+        &gfx,
     );
     Ok(())
+}
+
+/// Graphics quality + startup progress, passed to the UI pieces.
+struct Gfx<'a> {
+    quality: &'a mut GraphicsQuality,
+    startup: &'a mut Startup,
+    /// Shader pipelines still compiling.
+    compiling: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +210,7 @@ fn panel(
     rig: &mut OrbitCam,
     pointer: &Pointer,
     now: f64,
+    gfx: &mut Gfx,
 ) {
     ui.horizontal(|ui| {
         ui.label(
@@ -206,6 +232,7 @@ fn panel(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            slow_start_hint(ui, gfx);
             if let Some(z) = selection.element {
                 element_card(ui, z);
                 ui.add_space(8.0);
@@ -219,6 +246,8 @@ fn panel(
             molecule_list(ui, chem, selection, rig);
             ui.add_space(8.0);
             controls(ui, chem, settings, selection, rig);
+            ui.add_space(8.0);
+            graphics_controls(ui, gfx);
         });
 }
 
@@ -631,8 +660,10 @@ fn overlays(
     effects: &mut Effects,
     view: Rect,
     now: f64,
+    gfx: &Gfx,
 ) {
     let clip = egui::Rect::from_min_max(pos2(view.min.x, view.min.y), pos2(view.max.x, view.max.y));
+    preparing_indicator(ctx, gfx, clip, now);
     let painter = ctx
         .layer_painter(LayerId::new(Order::Middle, "scene_labels".into()))
         .with_clip_rect(clip);
@@ -698,6 +729,15 @@ fn overlays(
                 tc,
             );
             let q = chem.lab.charge(p.id);
+            // Lite has no translucent 3D halos, so ring ions here instead.
+            if q != 0 && gfx.quality.active == Quality::Lite {
+                let col = to_egui(if q > 0 { CATION } else { ANION });
+                painter.circle_stroke(
+                    p.pos,
+                    p.r * 1.3,
+                    Stroke::new((p.r * 0.12).clamp(1.5, 4.0), col),
+                );
+            }
             if q != 0 {
                 let br = (p.r * 0.38).clamp(8.0, 15.0);
                 let bc = p.pos + vec2(p.r * 0.8, -p.r * 0.8);
@@ -941,4 +981,132 @@ fn name_tag(
     placed.push(rect);
     p.rect_filled(rect, CornerRadius::same(6), Color32::from_black_alpha(150));
     p.galley(pos2(top_center.x, top_center.y), galley, Color32::WHITE);
+}
+
+// ---------------------------------------------------------------------------
+// Graphics quality & startup progress
+// ---------------------------------------------------------------------------
+
+/// "Preparing 3D graphics…" in the middle of the 3D view while shaders compile.
+fn preparing_indicator(ctx: &egui::Context, gfx: &Gfx, clip: egui::Rect, now: f64) {
+    if gfx.startup.phase == Phase::Ready || clip.width() < 50.0 {
+        return;
+    }
+    let p = ctx
+        .layer_painter(LayerId::new(Order::Middle, "preparing".into()))
+        .with_clip_rect(clip);
+    let c = clip.center();
+    // Spinner: a bright dot circling the centre.
+    let a = (now * 3.0) as f32;
+    p.circle_stroke(
+        c - vec2(0.0, 30.0),
+        14.0,
+        Stroke::new(2.0, Color32::from_gray(60)),
+    );
+    p.circle_filled(
+        c - vec2(0.0, 30.0) + vec2(a.cos(), a.sin()) * 14.0,
+        4.0,
+        Color32::from_gray(220),
+    );
+    p.text(
+        c + vec2(0.0, 6.0),
+        Align2::CENTER_CENTER,
+        "Preparing 3D graphics…",
+        bold(16.0),
+        Color32::from_gray(225),
+    );
+    let detail = if gfx.compiling > 0 {
+        format!(
+            "compiling {} shader{}, first launch on older GPUs can take a while",
+            gfx.compiling,
+            if gfx.compiling == 1 { "" } else { "s" }
+        )
+    } else {
+        "almost there".to_string()
+    };
+    p.text(
+        c + vec2(0.0, 28.0),
+        Align2::CENTER_CENTER,
+        detail,
+        FontId::proportional(12.5),
+        MUTED,
+    );
+}
+
+/// Offer Lite if Full took a long time to show the 3D scene on this computer.
+fn slow_start_hint(ui: &mut egui::Ui, gfx: &mut Gfx) {
+    const SLOW_SECS: f64 = 10.0;
+    let Some(secs) = gfx.startup.scene_secs() else {
+        return;
+    };
+    if gfx.quality.active != Quality::Full
+        || secs < SLOW_SECS
+        || gfx.startup.slow_hint_dismissed
+        || gfx.quality.saved == QualitySetting::Lite
+    {
+        return;
+    }
+    card(ui, |ui| {
+        ui.label(
+            RichText::new("Slow graphics start-up")
+                .font(bold(15.0))
+                .color(to_egui(OPEN_SITE)),
+        );
+        ui.label(format!(
+            "The 3D view took {secs:.0} s to appear on this computer. Lite graphics start much faster \
+             and keep every feature; only some glow and transparency effects are simplified."
+        ));
+        ui.horizontal(|ui| {
+            if ui.button("Use Lite graphics from next launch").clicked() {
+                gfx.quality.save(QualitySetting::Lite);
+            }
+            if ui.button("Dismiss").clicked() {
+                gfx.startup.slow_hint_dismissed = true;
+            }
+        });
+    });
+    ui.add_space(8.0);
+}
+
+fn graphics_controls(ui: &mut egui::Ui, gfx: &mut Gfx) {
+    let active = match gfx.quality.active {
+        Quality::Full => "Full",
+        Quality::Lite => "Lite",
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Graphics").font(bold(13.0)).color(MUTED));
+        let mut choice = gfx.quality.saved;
+        egui::ComboBox::from_id_salt("graphics_quality")
+            .selected_text(match choice {
+                QualitySetting::Auto => "Auto",
+                QualitySetting::Full => "Full",
+                QualitySetting::Lite => "Lite",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut choice, QualitySetting::Auto, "Auto (detect)");
+                ui.selectable_value(
+                    &mut choice,
+                    QualitySetting::Full,
+                    "Full: glow and transparency",
+                );
+                ui.selectable_value(
+                    &mut choice,
+                    QualitySetting::Lite,
+                    "Lite: fast start on older GPUs",
+                );
+            });
+        if choice != gfx.quality.saved {
+            gfx.quality.save(choice);
+        }
+    });
+    let mut status = format!("Now: {active} ({})", gfx.quality.reason);
+    let would_change = match gfx.quality.saved {
+        QualitySetting::Auto => false,
+        QualitySetting::Full => gfx.quality.active != Quality::Full,
+        QualitySetting::Lite => gfx.quality.active != Quality::Lite,
+    };
+    if would_change {
+        status.push_str(" · changes apply next launch");
+    }
+    ui.label(RichText::new(status).size(11.5).color(MUTED));
 }

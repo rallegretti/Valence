@@ -16,11 +16,15 @@ echo "== build";   cargo build --profile dist
 shot="${TMPDIR:-/tmp}/valence-smoke.png"
 rm -f "$shot"
 echo "== smoke test (opens a window for ~10-30 s)"
+# Exit codes: 0 = drew the game, 3 = frame was blank (locked/asleep screen),
+# 4 = no screenshot captured.
+set +e
 VALENCE_SCREENSHOT="$shot" ./target/dist/valence --demo
-if [[ -s "$shot" ]]; then
-    echo "OK: launched, rendered and exited cleanly. Screenshot: $shot"
-else
-    echo "FAIL: no screenshot produced" >&2
-    exit 1
-fi
+code=$?
+set -e
+case $code in
+    0) echo "OK: launched, rendered the game and exited cleanly. Screenshot: $shot" ;;
+    3) echo "FAIL: the game ran but the frame was blank. Unlock the screen / wake the display and retry." >&2; exit 3 ;;
+    *) echo "FAIL: game exited with code $code" >&2; exit 1 ;;
+esac
 echo "Binary: target/dist/valence"

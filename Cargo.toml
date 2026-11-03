@@ -46,6 +46,13 @@ bevy_egui = { version = "0.43.1", default-features = false, features = ["render"
 # bevy_asset hashes with blake3; "pure" avoids its C/asm build step so no C
 # compiler is needed on any platform (and cross-checks work from Linux).
 blake3 = { version = "1.8", features = ["pure"] }
+# Same wgpu as Bevy uses; only for probing GPU adapters at startup (gpu.rs).
+wgpu = { version = "30.0.1", default-features = false }
+
+# Windows: compile shaders with Microsoft's DXC, linked into the exe. The
+# default FXC compiler was far too slow on older GPUs (the window stayed black).
+[target.'cfg(windows)'.dependencies]
+bevy = { version = "0.20.1", default-features = false, features = ["statically-linked-dxc"] }
 
 # Fast iteration: optimize dependencies even in debug builds.
 [profile.dev]

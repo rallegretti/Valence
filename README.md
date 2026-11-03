@@ -13,7 +13,8 @@ cargo test --workspace         # rules, naming, layout, stress and crash-rollbac
 cargo build --profile dist     # optimised shipping build → target/dist/
 ```
 
-Runs on Windows, macOS (Apple Silicon and Intel) and Linux (X11 or Wayland).
+Runs on Windows (DirectX 12), macOS (Apple Silicon and Intel, Metal) and Linux
+(X11 or Wayland, Vulkan).
 Requires Rust 1.95+. Linux builds also need `pkg-config libx11-dev
 libxkbcommon-dev libwayland-dev` (Debian/Ubuntu names); Windows and macOS need
 nothing beyond Rust. No C compiler is required on any platform.
@@ -110,6 +111,56 @@ built), coordination complexes, and stereochemistry.
   panicking edit rolls back cleanly and that undo/redo works.
 - Release builds unwind on panic (so the guard can catch it). The Windows
   release build is a GUI app with no console window.
+
+## Graphics quality (Full / Lite)
+
+One build serves both modern and older hardware:
+
+- **Full:** bloom glow, film-style tone mapping, translucent ion halos and
+  lone pairs.
+- **Lite:** a single opaque material and no post-processing, so far fewer
+  shaders need compiling. Ions get coloured rings instead of glowing halos.
+  The chemistry, interface and every feature are the same.
+- **Auto** (default) picks Lite for software renderers and Intel integrated
+  GPUs up to Gen 9.5 (~2015–2020, e.g. HD 530 / UHD 630), and Full otherwise.
+  Override it in the panel (**Graphics: Auto / Full / Lite**, applies next
+  launch), or with `--lite` / `--full` on the command line. The choice is
+  saved in `settings.txt` in the platform config folder (`%APPDATA%\Valence`,
+  `~/Library/Application Support/Valence`, `~/.config/valence`).
+- If Full takes more than 10 s to show the 3D view, the panel offers to switch
+  to Lite.
+
+Startup is staged: the interface's tiny shaders compile first, so the
+periodic table appears almost at once. The 3D scene is built afterwards,
+with a "Preparing 3D graphics…" indicator while its shaders compile.
+Bevy's unused depth-prepass and deferred-lighting pipelines are switched off
+too. (GPU mesh preprocessing must stay on; turning it off stops opaque meshes
+drawing in Bevy 0.20.)
+
+Measured time from launch until the interface / the 3D scene are ready:
+
+| Machine | Interface | 3D scene (Lite) | 3D scene (Full) |
+|---|---|---|---|
+| Linux, RTX 4060 Ti (Vulkan) | 0.1 s | 0.3 s | 0.4 s |
+| macOS, Apple A18 Pro (Metal) | 0.1 s | 0.2 s | 0.2 s |
+| Windows, Intel HD 530 (DX12) | 3.0 s | 21 s (Auto picks Lite) | 36 s |
+
+On that Windows machine everything used to show black for about 40 s.
+
+## Windows notes
+
+- **Graphics:** the game uses DirectX 12 on Windows. Vulkan is only a
+  fallback, because older Intel drivers crash in their Vulkan driver
+  (`igvk64.dll`). Shaders are compiled with Microsoft's DXC, linked into the
+  exe; the default FXC compiler left the window black on older GPUs. Set
+  `WGPU_BACKEND` or `WGPU_DX12_COMPILER` to override either choice.
+- **Smart App Control** (Windows 11) blocks unsigned programs it doesn't
+  recognise, including freshly built Rust binaries and the game itself. For
+  local builds, turn it off. For releases, sign the exe with a trusted
+  code-signing certificate (e.g. Azure Trusted Signing) so players with Smart
+  App Control on can run it.
+- On older integrated GPUs the first frame can take a long time while shaders
+  compile; the launch test in `scripts/check.ps1` allows up to 90 s.
 
 ## Checking a platform locally
 

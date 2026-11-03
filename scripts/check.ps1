@@ -23,7 +23,11 @@ Write-Host "== smoke test (opens a window for ~10-30 s)"
 $env:VALENCE_SCREENSHOT = $shot
 $p = Start-Process -FilePath ".\target\dist\valence.exe" -ArgumentList "--demo" -Wait -PassThru
 Remove-Item Env:\VALENCE_SCREENSHOT
-if ($p.ExitCode -ne 0) { throw "game exited with code $($p.ExitCode)" }
-if (-not (Test-Path $shot) -or (Get-Item $shot).Length -eq 0) { throw "no screenshot produced" }
-Write-Host "OK: launched, rendered and exited cleanly. Screenshot: $shot"
+# Exit codes: 0 = drew the game, 3 = frame was blank (locked/asleep screen),
+# 4 = no screenshot captured.
+switch ($p.ExitCode) {
+    0 { Write-Host "OK: launched, rendered the game and exited cleanly. Screenshot: $shot" }
+    3 { throw "the game ran but the frame was blank. Unlock the screen / wake the display and retry." }
+    default { throw "game exited with code $($p.ExitCode)" }
+}
 Write-Host "Binary: target\dist\valence.exe"
