@@ -28,6 +28,9 @@ pub struct Chem {
     named_rev: u64,
     undo: VecDeque<Lab>,
     redo: Vec<Lab>,
+    /// Molecules were moved by hand since the last save (layout is saved,
+    /// but moving isn't a structural edit).
+    pub user_moved: bool,
 }
 
 impl Default for Chem {
@@ -40,6 +43,7 @@ impl Default for Chem {
             named_rev: u64::MAX,
             undo: VecDeque::new(),
             redo: Vec::new(),
+            user_moved: false,
         }
     }
 }
@@ -333,7 +337,6 @@ pub struct UiState {
     pub settings_open: bool,
     pub help_open: bool,
     pub about_open: bool,
-    pub quit_requested: bool,
     pub export_target: ExportTarget,
     /// Draw element symbols and name tags in exported images.
     pub export_labels: bool,
@@ -350,7 +353,6 @@ impl Default for UiState {
             settings_open: false,
             help_open: false,
             about_open: false,
-            quit_requested: false,
             export_target: ExportTarget::Lab,
             export_labels: true,
             export_details: true,

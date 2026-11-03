@@ -22,10 +22,13 @@
 mod camera;
 mod crash;
 mod debug;
+mod document;
 mod export;
 mod facts;
 mod gpu;
 mod interact;
+mod labfile;
+mod library;
 mod menu;
 mod palette;
 mod quality;
@@ -81,6 +84,8 @@ fn main() -> AppExit {
                         },
                         ..default()
                     }),
+                    // Closing asks about unsaved changes first (document.rs).
+                    close_when_requested: false,
                     ..default()
                 }),
         )
@@ -108,6 +113,11 @@ fn main() -> AppExit {
         .init_resource::<export::ExportJob>()
         .init_resource::<reactions_ui::ReactionState>()
         .init_resource::<reactions_ui::ReactionLib>()
+        .init_resource::<library::Catalog>()
+        .init_resource::<library::MyLibrary>()
+        .init_resource::<library::LibraryUi>()
+        .init_resource::<document::Document>()
+        .init_non_send::<document::DialogSlot>()
         .add_systems(
             Startup,
             (configure_egui, camera::spawn_camera, scene::setup_assets),
@@ -119,6 +129,7 @@ fn main() -> AppExit {
         .add_systems(
             Update,
             (
+                document::document_system,
                 interact::update_pointer,
                 interact::handle_keys,
                 camera::orbit_controls,
@@ -129,7 +140,6 @@ fn main() -> AppExit {
                 export::run_export,
                 scene::apply_isolation,
                 scene::sync_transforms,
-                menu::handle_quit,
                 adapt_background_rate,
             )
                 .chain(),

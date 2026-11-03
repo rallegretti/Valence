@@ -5,7 +5,7 @@ use bevy_egui::egui::{self, Color32, RichText};
 
 use crate::gpu::ApiSetting;
 use crate::quality::{GraphicsQuality, Quality, QualitySetting};
-use crate::state::{Chem, Edit, Effects, Selection, Tab, UiState};
+use crate::state::{Chem, Effects, Selection, Tab, UiState};
 
 const MUTED: Color32 = Color32::from_rgb(150, 158, 175);
 
@@ -16,45 +16,57 @@ pub fn menu_button(
     state: &mut UiState,
     selection: &mut Selection,
     effects: &mut Effects,
+    doc: &mut crate::document::Document,
     now: f64,
 ) {
     ui.menu_button(RichText::new("☰").size(22.0).color(Color32::WHITE), |ui| {
         ui.set_min_width(180.0);
         ui.menu_button("File", |ui| {
+            use crate::document::{Action, Request};
             if ui
-                .add_enabled(!chem.lab.is_empty(), egui::Button::new("New lab"))
+                .add(egui::Button::new("New lab").shortcut_text("Ctrl/Cmd+N"))
                 .clicked()
             {
-                let _ = chem.edit("clear", |lab| {
-                    lab.clear();
-                    Ok(())
-                });
-                selection.atom = None;
+                doc.request(Request::Do(Action::New));
                 ui.close();
             }
+            if ui
+                .add(egui::Button::new("Open Lab Data…").shortcut_text("Ctrl/Cmd+O"))
+                .clicked()
+            {
+                doc.request(Request::Do(Action::Open));
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::new("Save Lab Data").shortcut_text("Ctrl/Cmd+S"))
+                .clicked()
+            {
+                doc.request(Request::Save);
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::new("Save Lab Data As…").shortcut_text("Ctrl/Cmd+Shift+S"))
+                .clicked()
+            {
+                doc.request(Request::SaveAs);
+                ui.close();
+            }
+            ui.separator();
             if ui
                 .button("Open example shelf")
                 .on_hover_text("Replaces the lab with 12 example molecules")
                 .clicked()
             {
-                let edit = chem.edit("examples", |lab| {
-                    lab.clear();
-                    crate::debug::build_demo(lab)
-                });
-                if let Edit::Done(roots) = &edit {
-                    selection.atom = roots.first().copied();
-                }
-                effects.report(&edit, Vec3::ZERO, "Example shelf loaded", now);
+                doc.request(Request::Do(Action::OpenExample));
                 ui.close();
             }
-            ui.separator();
             if ui.button("Export image…").clicked() {
                 state.tab = Tab::Export;
                 ui.close();
             }
             ui.separator();
             if ui.button("Quit").clicked() {
-                state.quit_requested = true;
+                doc.request(Request::Do(Action::Quit));
                 ui.close();
             }
         });
@@ -300,12 +312,5 @@ pub fn about_window(ctx: &egui::Context, state: &mut UiState) {
     });
     if response.should_close() {
         state.about_open = false;
-    }
-}
-
-/// File → Quit.
-pub fn handle_quit(state: Res<UiState>, mut exit: MessageWriter<AppExit>) {
-    if state.quit_requested {
-        exit.write(AppExit::Success);
     }
 }

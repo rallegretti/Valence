@@ -28,16 +28,16 @@ Remove-Item Env:\VALENCE_SCREENSHOT
 switch ($p.ExitCode) {
     0 { Write-Host "OK: launched, rendered the game and exited cleanly. Screenshot: $shot" }
     3 { throw "the game ran but the frame was blank. Unlock the screen / wake the display and retry." }
-    default { throw "game exited with code $($p.ExitCode)" }
+    default { throw "app exited with code $($p.ExitCode)" }
 }
 $ft = Join-Path $env:TEMP "valence-feature-test"
 Remove-Item $ft -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $ft | Out-Null
-Write-Host "== feature test (reactions, exports, settings; opens a window)"
+Write-Host "== feature test (reactions, exports, settings, lab data save/open, library; opens a window)"
 $env:VALENCE_FEATURE_TEST = $ft; $env:VALENCE_EXPORT_DIR = $ft
 $p = Start-Process -FilePath ".\target\dist\valence.exe" -Wait -PassThru
 Remove-Item Env:\VALENCE_FEATURE_TEST, Env:\VALENCE_EXPORT_DIR
 $exports = @(Get-ChildItem (Join-Path $ft "valence-*.png") -ErrorAction SilentlyContinue).Count
 if ($p.ExitCode -ne 0 -or $exports -ne 3) { throw "feature test failed (exit $($p.ExitCode), $exports exports) - see $ft" }
-Write-Host "OK: reaction, molecule and lab exports written to $ft"
+Write-Host "OK: exports, lab data round trip and library shot written to $ft"
 Write-Host "Binary: target\dist\valence.exe"

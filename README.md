@@ -29,6 +29,11 @@ name, its 3D shape, and the facts that go with it.
   automatically, estimate whether they release or absorb energy, and
   recognise famous reactions like combustion, photosynthesis and the Haber
   process.
+- **Pick from the Library.** Search 100+ ready-made compounds by name or
+  formula and add them with one click, or save your own creations to
+  **My molecules**.
+- **Save your work.** Save the whole lab (molecules, reactions and your
+  own Library entries) to a file and open it again later.
 - **Export pictures** of your build, a single molecule with a fact card, or a
   whole reaction, ready for notes, slides or worksheets.
 
@@ -99,6 +104,39 @@ then a single.
 Click any atom to see that molecule's details in the sidebar: names, formula,
 mass, bonds, energy and more.
 
+### The Library
+
+The **Library** sits on the right edge of the 3D area. Click **▶** to tuck it
+away and the **◀ Library** tab to bring it back.
+
+- **Search** by everyday name, IUPAC name or formula: `water`, `ethanoic`,
+  `H2O` and `H₂O` all work.
+- **Add** drops the molecule into an empty spot in the lab.
+- **My molecules:** select a molecule in the lab, give it a name and click
+  **Save** to keep it in the Library. Rename (✎) or remove (✕) entries any
+  time. They're saved with your lab data file.
+
+### Saving and opening your work
+
+**☰ → File → Save Lab Data** saves everything in one `.valence` file: the
+molecules and where they sit, your reactions, your **My molecules** list and
+the camera view. **Open Lab Data…** brings it all back.
+
+- The first save asks where to put the file. After that, **Save** updates
+  the same file (or the file you opened); use **Save Lab Data As…** to make a
+  copy somewhere else.
+- The window title shows the file's name, with a **•** when there are
+  unsaved changes. Valence asks before anything would throw them away: a new
+  lab, opening another file, or quitting.
+- **Saving is safe.** The new version is written to a temporary file, read
+  back and checked, and only then swapped in place of the old one. If
+  anything goes wrong (disk full, unplugged drive), the old file is left
+  exactly as it was. The previous version is also kept next to it as
+  `yourfile.valence.bak`.
+- **Opening is safe too.** The whole file is read and checked before your
+  current lab is touched. A damaged file is refused with a message and
+  nothing changes. Opening a file can be undone with **Ctrl/Cmd + Z**.
+
 ### Reactions
 
 ![The Reactions tab showing 2 H₂ + O₂ → 2 H₂O, marked balanced and exothermic, with hydrogen and oxygen on the left of an arrow and water on the right](docs/screenshots/reactions.png)
@@ -132,7 +170,7 @@ saved in your **Pictures/Valence** folder.
 ### Menu and settings
 
 The **☰** button next to the title holds the menus:
-- **File:** new lab, example shelf, export, quit
+- **File:** new lab, open / save lab data, example shelf, export, quit
 - **Edit:** undo, redo, delete
 - **Settings**
 - **Help:** a controls cheat-sheet
@@ -160,6 +198,9 @@ The **☰** button next to the title holds the menus:
 | Zoom | Scroll, or pinch on a trackpad |
 | Remove an atom | Right-click it, or select it and press **Delete** / **Backspace** |
 | Undo / redo | **Ctrl/Cmd + Z** / **Ctrl/Cmd + Shift + Z** |
+| Save lab data / save as | **Ctrl/Cmd + S** / **Ctrl/Cmd + Shift + S** |
+| Open lab data | **Ctrl/Cmd + O** |
+| New lab | **Ctrl/Cmd + N** |
 | Fit everything in view | **F** |
 | Cancel a drag | **Esc** |
 
@@ -182,6 +223,7 @@ The Windows build isn't code-signed yet; see the Windows heads-up under
 
 | | Windows | macOS | Linux |
 |---|---|---|---|
+| Lab data files | Wherever you save them (plus a `.bak` copy of the previous version) | same | same |
 | Exported images | `Pictures\Valence` | `~/Pictures/Valence` | `~/Pictures/Valence` |
 | Settings | `%APPDATA%\Valence` | `~/Library/Application Support/Valence` | `~/.config/valence` |
 | Crash log | `%LOCALAPPDATA%\Valence` | `~/Library/Logs/Valence` | `~/.local/state/valence` |

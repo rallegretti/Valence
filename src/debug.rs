@@ -391,6 +391,9 @@ fn feature_test(
     mut rig: Single<&mut OrbitCam>,
     startup: Res<crate::quality::Startup>,
     mut exit: MessageWriter<AppExit>,
+    mut mine: ResMut<crate::library::MyLibrary>,
+    mut lib_ui: ResMut<crate::library::LibraryUi>,
+    mut saved: Local<Option<(usize, String, String)>>,
 ) {
     use crate::reactions_ui::Role;
     use crate::state::{ExportTarget, Tab};
@@ -519,9 +522,76 @@ fn feature_test(
             test.step = 9;
         }
         9 => {
+            // Lab data: save (twice, so a backup exists), wipe, reopen.
+            ui.settings_open = false;
+            if let Some(m) = chem.molecules.iter().find(|m| m.names.formula == "H₂O") {
+                let g = chem.lab.graph(&m.atoms);
+                mine.molecules = vec![crate::labfile::SavedMolecule::from_graph("My water", &g)];
+            }
+            let path = test.dir.join("feature-test.valence");
+            for _ in 0..2 {
+                if let Err(e) = crate::document::save_lab(&path, &chem, &reaction, &mine, &rig) {
+                    error!("feature test: save failed: {e}");
+                    exit.write(AppExit::from_code(5));
+                    return;
+                }
+            }
+            *saved = Some((
+                chem.lab.atoms().count(),
+                reaction.equation(&chem),
+                format!("{:?}", rig.focus),
+            ));
+            let _ = chem.edit("wipe", |lab| {
+                lab.clear();
+                Ok(())
+            });
+            reaction.replace(Vec::new());
+            mine.molecules.clear();
+            **rig = OrbitCam::default();
+            test.step = 10;
+            test.wait = 5;
+        }
+        10 => {
+            let path = test.dir.join("feature-test.valence");
+            if let Err(e) =
+                crate::document::load_lab(&path, &mut chem, &mut reaction, &mut mine, &mut rig)
+            {
+                error!("feature test: open failed: {e}");
+                exit.write(AppExit::from_code(5));
+                return;
+            }
+            let now = (
+                chem.lab.atoms().count(),
+                reaction.equation(&chem),
+                format!("{:?}", rig.focus),
+            );
+            let backup = path.with_file_name("feature-test.valence.bak").exists();
+            let ok = saved.as_ref() == Some(&now) && mine.molecules.len() == 1 && backup;
+            info!(
+                "feature test: lab data round trip {:?} → {:?}, my molecules {}, backup {backup}",
+                *saved,
+                now,
+                mine.molecules.len()
+            );
+            if !ok {
+                error!("feature test: lab data round trip mismatch");
+                exit.write(AppExit::from_code(5));
+                return;
+            }
+            lib_ui.open = true;
+            lib_ui.set_query("acid");
+            test.step = 11;
+            test.wait = 30;
+        }
+        11 => {
+            shot(&mut commands, &mut test, "4-library.png");
+            test.wait = 20;
+            test.step = 12;
+        }
+        12 => {
             info!("feature test: done; window shots {:?}", test.shots);
             exit.write(AppExit::Success);
-            test.step = 10;
+            test.step = 13;
         }
         _ => {}
     }

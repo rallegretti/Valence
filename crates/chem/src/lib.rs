@@ -32,5 +32,8 @@ pub mod smiles;
 
 pub use glam::Vec3;
 pub use graph::{BondKind, MolGraph};
-pub use lab::{AtomId, AttachMode, AttachPlan, BondId, ConnectPlan, Lab, MAX_ATOMS, Reject};
+pub use lab::{
+    AtomData, AtomId, AttachMode, AttachPlan, BondData, BondId, ConnectPlan, Lab, LabData,
+    MAX_ATOMS, Reject,
+};
 pub use naming::{Namer, Names};

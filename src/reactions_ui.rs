@@ -21,6 +21,14 @@ pub enum Role {
 }
 
 impl Role {
+    pub fn key(self) -> &'static str {
+        match self {
+            Role::Input => "input",
+            Role::Catalyst => "catalyst",
+            Role::Output => "output",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Role::Input => "Inputs (reactants)",
@@ -98,6 +106,42 @@ impl ReactionState {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Live parts as (anchor atom, role, coefficient), for saving.
+    pub fn to_saved(&self, chem: &Chem) -> Vec<(AtomId, Role, u32)> {
+        let parts = self.parts(chem);
+        self.entries
+            .iter()
+            .filter(|e| {
+                parts
+                    .iter()
+                    .any(|p| chem.atom_mol.get(e.anchor as usize) == Some(&p.molecule))
+            })
+            .map(|e| (e.anchor, e.role, e.coeff))
+            .collect()
+    }
+
+    /// Replace everything (after loading a file).
+    pub fn replace(&mut self, parts: Vec<(AtomId, Role, u32)>) {
+        self.entries = parts
+            .into_iter()
+            .map(|(anchor, role, coeff)| Entry {
+                anchor,
+                role,
+                coeff,
+            })
+            .collect();
+    }
+
+    /// Changes whenever the reaction set-up changes (for unsaved-changes tracking).
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for e in &self.entries {
+            (e.anchor, e.role as u8, e.coeff).hash(&mut h);
+        }
+        h.finish()
     }
 
     fn role_of(&self, chem: &Chem, molecule: usize) -> Option<usize> {
@@ -307,7 +351,13 @@ pub fn arrange(chem: &mut Chem, state: &ReactionState, rig: &mut OrbitCam) {
     for (atoms, delta) in moves {
         chem.lab.translate(&atoms, delta);
     }
-    rig.dist = rig.dist.max(total * 0.9 + 6.0);
+    chem.user_moved = true;
+    // Fit the whole row across the visible width (45° vertical field of view).
+    let aspect = rig.view_aspect.clamp(0.2, 5.0);
+    rig.dist = rig
+        .dist
+        .max(total * 0.9f32.max(1.25 / aspect) + 6.0)
+        .min(200.0);
 }
 
 /// The Reactions tab.

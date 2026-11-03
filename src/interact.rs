@@ -160,6 +160,7 @@ pub fn handle_keys(
 }
 
 pub fn handle_mouse(
+    egui: Res<EguiWantsInput>,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -247,6 +248,7 @@ pub fn handle_mouse(
                 }
             }
             Drag::Atom { atom, .. } => {
+                chem.user_moved = true;
                 if let Some(target) = pointer.hovered_atom {
                     let at = chem.lab.atom(target).map(|a| a.pos).unwrap_or_default();
                     let edit = chem.edit("connect", |lab| lab.connect(atom, target));
@@ -279,6 +281,7 @@ pub fn handle_mouse(
         *right_press = None;
     }
     if keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace])
+        && !egui.wants_keyboard_input()
         && *drag == Drag::None
         && let Some(atom) = pointer.hovered_atom.or(selection.atom)
     {

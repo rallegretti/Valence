@@ -103,6 +103,33 @@ pub struct ConnectPlan {
     pub expand_b: Option<u8>,
 }
 
+/// Serializable snapshot of a lab: atoms and which pairs are bonded. Bond
+/// kinds, orders and charges are recomputed on load by the normal rules.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LabData {
+    pub atoms: Vec<AtomData>,
+    pub bonds: Vec<BondData>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AtomData {
+    pub z: u8,
+    pub pos: [f32; 3],
+    pub valence: u8,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub protonated: bool,
+}
+
+/// A bond between `atoms[a]` and `atoms[b]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BondData {
+    pub a: u32,
+    pub b: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Lab {
     atoms: Vec<Option<Atom>>,
@@ -281,6 +308,114 @@ impl Lab {
             revision: self.revision + 1,
             ..Lab::default()
         };
+    }
+
+    /// Snapshot for saving. Also returns the atom id at each index, so
+    /// callers can translate their own references (e.g. reaction anchors).
+    pub fn to_data(&self) -> (LabData, Vec<AtomId>) {
+        let ids: Vec<AtomId> = self.atoms().map(|(id, _)| id).collect();
+        let mut index = vec![u32::MAX; self.atoms.len()];
+        let atoms = ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &id)| {
+                let a = self.atom(id)?;
+                index[id as usize] = i as u32;
+                Some(AtomData {
+                    z: a.z,
+                    pos: a.pos.to_array(),
+                    valence: a.valence,
+                    protonated: a.protonated,
+                })
+            })
+            .collect();
+        let bonds = self
+            .bonds()
+            .filter_map(|(_, b)| {
+                let (ia, ib) = (*index.get(b.a as usize)?, *index.get(b.b as usize)?);
+                (ia != u32::MAX && ib != u32::MAX).then_some(BondData { a: ia, b: ib })
+            })
+            .collect();
+        (LabData { atoms, bonds }, ids)
+    }
+
+    /// Build a lab from a snapshot, rejecting anything inconsistent. Returns
+    /// the new lab and the atom id for each snapshot index. Never touches an
+    /// existing lab, so a bad file can't damage what's open.
+    pub fn from_data(data: &LabData) -> Result<(Lab, Vec<AtomId>), Reject> {
+        let bad = |msg: String| -> Result<(Lab, Vec<AtomId>), Reject> {
+            Err(Reject(format!("Invalid lab data: {msg}")))
+        };
+        if data.atoms.len() > MAX_ATOMS {
+            return bad(format!(
+                "{} atoms is more than the limit of {MAX_ATOMS}",
+                data.atoms.len()
+            ));
+        }
+        let mut lab = Lab::new();
+        let mut ids = Vec::with_capacity(data.atoms.len());
+        for (i, a) in data.atoms.iter().enumerate() {
+            if !(1..=118).contains(&a.z) {
+                return bad(format!("atom {i} has unknown element {}", a.z));
+            }
+            let pos = Vec3::from_array(a.pos);
+            if !pos.is_finite() || pos.abs().max_element() > 1.0e6 {
+                return bad(format!("atom {i} has an invalid position"));
+            }
+            let allowed = element(a.z).valences;
+            if !allowed.contains(&a.valence) && !(allowed.is_empty() && a.valence == 0) {
+                return bad(format!(
+                    "atom {i} ({}) can't have valence {}",
+                    element(a.z).symbol,
+                    a.valence
+                ));
+            }
+            if a.protonated && (!elements::can_protonate(a.z) || category(a.z).is_metal()) {
+                return bad(format!(
+                    "atom {i} ({}) can't be protonated",
+                    element(a.z).symbol
+                ));
+            }
+            ids.push(lab.alloc_atom(Atom {
+                z: a.z,
+                pos,
+                valence: a.valence,
+                protonated: a.protonated,
+                bonds: Vec::new(),
+                domains: Vec::new(),
+                vel: Vec3::ZERO,
+            }));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (k, b) in data.bonds.iter().enumerate() {
+            let (Some(&ia), Some(&ib)) = (ids.get(b.a as usize), ids.get(b.b as usize)) else {
+                return bad(format!("bond {k} refers to a missing atom"));
+            };
+            if ia == ib {
+                return bad(format!("bond {k} joins an atom to itself"));
+            }
+            if !seen.insert((ia.min(ib), ia.max(ib))) {
+                return bad(format!("bond {k} is a duplicate"));
+            }
+            let (za, zb) = (data.atoms[b.a as usize].z, data.atoms[b.b as usize].z);
+            let kind = match pair_kind(za, zb) {
+                Ok(k) => k,
+                Err(e) => return bad(format!("bond {k}: {e}")),
+            };
+            if lab.alloc_bond(ia, ib, kind).is_none() {
+                return bad(format!("bond {k} couldn't be created"));
+            }
+        }
+        for (i, &id) in ids.iter().enumerate() {
+            if lab.sigma(id) > lab.capacity(id) {
+                return bad(format!("atom {i} has more bonds than it can hold"));
+            }
+        }
+        lab.after_change(&ids);
+        if let Err(e) = lab.validate() {
+            return bad(e);
+        }
+        Ok((lab, ids))
     }
 
     /// Replace the contents with a snapshot (undo/redo/rollback). The
@@ -1462,6 +1597,124 @@ mod tests {
         );
         assert_eq!(lab.revision(), rev);
         assert!(lab.is_empty());
+    }
+
+    #[test]
+    fn data_round_trip() {
+        use crate::canon::structure_hash;
+        let mut lab = Lab::new();
+        let c = lab.add_atom(6, Vec3::new(1.0, 2.0, 3.0)).unwrap();
+        build(&mut lab, c, &[1, 1, 1]);
+        let o = lab.attach(c, 8, Vec3::X).unwrap();
+        lab.attach(o, 1, Vec3::X).unwrap();
+        let cl = lab.add_atom(17, Vec3::new(9.0, 0.0, 0.0)).unwrap();
+        lab.attach(cl, 11, Vec3::X).unwrap();
+        let n = lab.add_atom(7, Vec3::new(-9.0, 0.0, 0.0)).unwrap();
+        build(&mut lab, n, &[1, 1, 1, 1]); // ammonium (protonated)
+        let s = lab.add_atom(16, Vec3::new(0.0, 9.0, 0.0)).unwrap();
+        build(&mut lab, s, &[8, 8, 8]); // SO3 (expanded valence)
+        lab.remove_atom(c); // leave a hole in the id space
+
+        let (data, ids) = lab.to_data();
+        assert_eq!(data.atoms.len(), lab.atom_count());
+        let (loaded, new_ids) = Lab::from_data(&data).unwrap();
+        loaded.validate().unwrap();
+        assert_eq!(new_ids.len(), ids.len());
+        let hashes = |l: &Lab| {
+            let mut v: Vec<u64> = l
+                .components()
+                .iter()
+                .map(|c| structure_hash(&l.graph(c)))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(hashes(&lab), hashes(&loaded), "same molecules after reload");
+        for (&old, &new) in ids.iter().zip(&new_ids) {
+            assert_eq!(lab.atom(old).unwrap().pos, loaded.atom(new).unwrap().pos);
+            assert_eq!(lab.charge(old), loaded.charge(new));
+        }
+        assert_eq!(
+            loaded.to_data().0,
+            data,
+            "saving the loaded lab gives identical data"
+        );
+    }
+
+    #[test]
+    fn bad_data_is_rejected() {
+        let ok = AtomData {
+            z: 6,
+            pos: [0.0; 3],
+            valence: 4,
+            protonated: false,
+        };
+        let cases = [
+            LabData {
+                atoms: vec![AtomData { z: 0, ..ok }],
+                bonds: vec![],
+            },
+            LabData {
+                atoms: vec![AtomData { z: 200, ..ok }],
+                bonds: vec![],
+            },
+            LabData {
+                atoms: vec![AtomData {
+                    pos: [f32::NAN, 0.0, 0.0],
+                    ..ok
+                }],
+                bonds: vec![],
+            },
+            LabData {
+                atoms: vec![AtomData { valence: 3, ..ok }],
+                bonds: vec![],
+            },
+            LabData {
+                atoms: vec![AtomData {
+                    protonated: true,
+                    ..ok
+                }],
+                bonds: vec![],
+            },
+            LabData {
+                atoms: vec![ok],
+                bonds: vec![BondData { a: 0, b: 0 }],
+            },
+            LabData {
+                atoms: vec![ok, ok],
+                bonds: vec![BondData { a: 0, b: 5 }],
+            },
+            LabData {
+                atoms: vec![ok, ok],
+                bonds: vec![BondData { a: 0, b: 1 }, BondData { a: 1, b: 0 }],
+            },
+            LabData {
+                atoms: vec![
+                    ok,
+                    AtomData {
+                        z: 10,
+                        valence: 0,
+                        ..ok
+                    },
+                ],
+                bonds: vec![BondData { a: 0, b: 1 }],
+            },
+            LabData {
+                atoms: vec![
+                    AtomData {
+                        z: 1,
+                        valence: 1,
+                        ..ok
+                    };
+                    3
+                ],
+                bonds: vec![BondData { a: 0, b: 1 }, BondData { a: 0, b: 2 }],
+            },
+        ];
+        for (i, d) in cases.iter().enumerate() {
+            assert!(Lab::from_data(d).is_err(), "case {i} should be rejected");
+        }
+        assert!(Lab::from_data(&LabData::default()).unwrap().0.is_empty());
     }
 
     #[test]

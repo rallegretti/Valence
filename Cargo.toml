@@ -10,7 +10,7 @@ description = "Drag-and-drop 3D molecule builder"
 rust-version = "1.95"
 
 [dependencies]
-valence_chem = { path = "crates/chem" }
+valence_chem = { path = "crates/chem", features = ["serde"] }
 # Only the Bevy features we use: no audio, gamepad (needs libudev on Linux),
 # glTF, scenes or bevy_ui. Fewer system deps = builds cleanly on every OS.
 bevy = { version = "0.20.1", default-features = false, features = [
@@ -50,6 +50,11 @@ blake3 = { version = "1.8", features = ["pure"] }
 wgpu = { version = "30.0.1", default-features = false }
 # Same image crate as Bevy; used to crop and save exported PNGs.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Native open/save dialogs (Windows COM, macOS AppKit, Linux XDG portal; no GTK).
+rfd = "0.17"
+# Lab data files (.valence) are JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Windows: compile shaders with Microsoft's DXC, linked into the exe. The
 # default FXC compiler was far too slow on older GPUs (the window stayed black).

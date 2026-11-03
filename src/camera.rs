@@ -18,6 +18,9 @@ pub struct OrbitCam {
     pub yaw: f32,
     pub pitch: f32,
     pub dist: f32,
+    /// Width / height of the visible 3D area (between the side panels), so
+    /// framing can fit things horizontally too.
+    pub view_aspect: f32,
 }
 
 impl Default for OrbitCam {
@@ -27,11 +30,23 @@ impl Default for OrbitCam {
             yaw: 0.5,
             pitch: -0.35,
             dist: 14.0,
+            view_aspect: 1.6,
         }
     }
 }
 
 impl OrbitCam {
+    /// How much further back the camera must sit to fit a sphere when the
+    /// view is narrower than it is tall (1 for wide views).
+    pub fn narrowness(&self) -> f32 {
+        let a = if self.view_aspect.is_finite() {
+            self.view_aspect.clamp(0.2, 5.0)
+        } else {
+            1.6
+        };
+        (1.0 / a).max(1.0)
+    }
+
     /// Recover from any non-finite state rather than rendering garbage.
     pub fn sanitize(&mut self) {
         if !(self.focus.is_finite()
@@ -212,5 +227,5 @@ pub fn frame_all(rig: &mut OrbitCam, chem: &Chem) {
         .map(|p| p.distance(center))
         .fold(0.0f32, f32::max);
     rig.focus = center;
-    rig.dist = (radius * 2.6 + 6.0).clamp(4.0, 200.0);
+    rig.dist = (radius * 2.6 * rig.narrowness() + 6.0).clamp(4.0, 200.0);
 }

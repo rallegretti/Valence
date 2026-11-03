@@ -125,12 +125,22 @@ pub struct UiRes<'w> {
     adapter: Option<Res<'w, RenderAdapterInfo>>,
 }
 
+/// The Library panel and the open lab document.
+#[derive(SystemParam)]
+pub struct LibRes<'w> {
+    catalog: Res<'w, crate::library::Catalog>,
+    mine: ResMut<'w, crate::library::MyLibrary>,
+    lib_ui: ResMut<'w, crate::library::LibraryUi>,
+    doc: ResMut<'w, crate::document::Document>,
+}
+
 pub fn ui_system(
     mut contexts: EguiContexts,
     mut camera: Single<(&mut Camera, &GlobalTransform, &mut OrbitCam)>,
     window: Single<&Window, With<PrimaryWindow>>,
     ready: Res<FontsReady>,
     r: UiRes,
+    lib: LibRes,
     mut fades: Local<std::collections::HashMap<AtomId, f32>>,
 ) -> Result {
     if ready.0 < 3 {
@@ -155,6 +165,12 @@ pub fn ui_system(
         isolation,
         adapter,
     } = r;
+    let LibRes {
+        catalog,
+        mut mine,
+        mut lib_ui,
+        mut doc,
+    } = lib;
     let now = time.elapsed_secs_f64();
     let ctx = contexts.ctx_mut()?.clone();
     chem.refresh();
@@ -189,6 +205,7 @@ pub fn ui_system(
                     &mut state,
                     &mut selection,
                     &mut effects,
+                    &mut doc,
                     now,
                 );
                 ui.label(
@@ -285,36 +302,50 @@ pub fn ui_system(
             }
         });
     let left = panel.response.rect.width();
+    let right = crate::library::library_panel(
+        &mut root,
+        &mut lib_ui,
+        &catalog,
+        &mut mine,
+        &mut chem,
+        &mut selection,
+        &mut effects,
+        rig,
+        now,
+    );
 
     crate::menu::settings_window(&ctx, &mut state, &mut quality, adapter.as_deref());
     crate::menu::help_window(&ctx, &mut state);
     crate::menu::about_window(&ctx, &mut state);
 
-    // 3D viewport = everything right of the panel.
-    // A minimised or degenerate window has no room for a viewport: render
-    // full-window (invisible anyway) instead of handing the GPU a bad rect.
+    // 3D view = the area between the periodic table and the Library.
     let scale = window.scale_factor();
     let (pw, ph) = (window.physical_width(), window.physical_height());
-    let phys_left = if left.is_finite() {
-        (left.max(0.0) * scale) as u32
-    } else {
-        0
+    let phys = |w: f32| {
+        if w.is_finite() {
+            (w.max(0.0) * scale) as u32
+        } else {
+            0
+        }
     };
-    // Shift the 3D projection so the scene is centred in the area right of
-    // the panel: render the window as the left part of a wider virtual view
-    // whose centre is the centre of that area. Same scale as a viewport, but
-    // the interface and 3D view are drawn by one camera in one pass.
+    let (pl, pr) = (phys(left), phys(right));
     cam.viewport = None;
-    cam.sub_camera_view = (pw > phys_left + 1 && ph > 1).then(|| SubCameraView {
-        full_size: UVec2::new(pw + phys_left, ph),
-        offset: Vec2::ZERO,
-        size: UVec2::new(pw, ph),
-    });
-    view.0 = Rect::new(
-        left.min(window.width()),
-        0.0,
-        window.width(),
-        window.height(),
+    cam.sub_camera_view = centred_projection(pw, ph, pl, pr);
+    let w = window.width();
+    let l = left.clamp(0.0, w);
+    let r_edge = (w - right.max(0.0)).clamp(l, w);
+    view.0 = Rect::new(l, 0.0, r_edge, window.height());
+    if view.0.height() > 1.0 {
+        let aspect = view.0.width() / view.0.height();
+        if (rig.view_aspect - aspect).abs() > 0.01 {
+            rig.view_aspect = aspect;
+        }
+    }
+    crate::document::document_ui(
+        &ctx,
+        &mut doc,
+        egui::Rect::from_min_max(pos2(view.0.min.x, 0.0), pos2(view.0.max.x, view.0.max.y)),
+        now,
     );
 
     // The reaction diagram shows on the Reactions tab (or in a reaction export).
@@ -356,6 +387,35 @@ pub fn ui_system(
         &mut scene,
     );
     Ok(())
+}
+
+/// Shift the 3D projection so the scene is centred in the area between the
+/// two side panels: the window is rendered as part of a wider virtual view
+/// whose centre is the centre of that area. Same scale as a viewport, but the
+/// interface and 3D view are drawn by one camera in one pass. A minimised or
+/// degenerate window gets no sub-view (renders full-window, invisible anyway).
+fn centred_projection(pw: u32, ph: u32, left: u32, right: u32) -> Option<SubCameraView> {
+    if ph <= 1 || left.saturating_add(right).saturating_add(1) >= pw {
+        return None;
+    }
+    // Twice the centre of the 3D area, in physical pixels.
+    let c2 = left + (pw - right);
+    Some(if c2 >= pw {
+        // Centre right of the window's middle: the window is the left part.
+        SubCameraView {
+            full_size: UVec2::new(c2, ph),
+            offset: Vec2::ZERO,
+            size: UVec2::new(pw, ph),
+        }
+    } else {
+        // Centre left of middle: the window is the right part.
+        let full = 2 * pw - c2;
+        SubCameraView {
+            full_size: UVec2::new(full, ph),
+            offset: Vec2::new((full - pw) as f32, 0.0),
+            size: UVec2::new(pw, ph),
+        }
+    })
 }
 
 /// Extra overlay inputs: export isolation/card and the reaction diagram.

@@ -44,6 +44,9 @@ src/            Bevy 0.20 front end
   camera.rs     orbit camera (also hosts the egui context)
   ui.rs         sidebar tabs, periodic table, cards, 2D overlays
   menu.rs       ☰ menu, Settings / Help / About windows
+  library.rs    Library panel: built-in catalog, My molecules
+  document.rs   open file, unsaved changes, Save / Open flows, dialogs
+  labfile.rs    .valence file format, validation, atomic save
   export.rs     PNG export (isolate, frame, capture, crop, restore)
   reactions_ui.rs  Reactions tab, 3D arrangement, + / → diagram
   facts.rs      molecule facts for cards and exports
@@ -114,10 +117,43 @@ bonds are involved), and matches inputs against a library of 17 reactions
     garbage input, checking every invariant after each one.
   - Separate tests cover crash rollback and undo/redo.
 
+## Lab data files (`.valence`)
+
+Pretty-printed JSON with a `format: "valence-lab"` / `version` envelope
+(`labfile.rs`). It holds the lab (atoms: element, position, valence,
+protonation; bonds as index pairs, with orders re-solved on load), reaction
+roles keyed by atom index, My molecules (atoms, charges, bond orders) and the
+camera. Newer versions than the app understands are refused rather than
+half-read.
+
+**Saving** (`labfile::save_atomic`):
+1. Write `<name>.saving-<pid>` next to the target and `fsync` it.
+2. Read it back; it must match byte for byte and parse.
+3. If the target exists, copy it to `<name>.bak.saving`, then rename that to
+   `<name>.bak` (the original stays in place throughout).
+4. Rename the temporary file over the target (atomic on all three
+   platforms; `MoveFileExW` with replace on Windows).
+5. `fsync` the directory on Unix so the rename itself is durable.
+
+Any failure removes the temporary file and leaves the original untouched.
+
+**Opening** parses and fully validates first (`LabFile::validate` and
+`Lab::from_data`: element numbers, finite positions, allowed valences,
+bond indices, duplicates, bonding rules, capacity). Only then is the open lab
+replaced, as one undoable `Chem::edit`, and the reactions, My molecules and
+camera swapped in.
+
+**Unsaved changes** (`document.rs`) compare the lab revision, a fingerprint
+of reactions and My molecules, and a "moved by the user" flag with the last
+save. New lab, Open, the example shelf, Quit and the window's close button
+(`close_when_requested: false`) all go through the "Save changes?" prompt.
+File dialogs are `rfd` async dialogs, polled each frame so the app keeps
+drawing; on Linux they use the XDG desktop portal (zenity fallback).
+
 ## Rendering notes
 
 - **One camera.** The 3D camera also hosts the egui context. The scene is
-  centred right of the sidebar with a `SubCameraView` (an off-centre
+  centred between the sidebar and the Library with a `SubCameraView` (an off-centre
   projection), not a viewport, so the UI and 3D view are drawn in one pass.
 - **Font sizes are snapped** (`snap_font` in `ui.rs`). egui rebuilds its
   whole glyph atlas when it passes 80% full, and the entire UI disappears for
@@ -178,7 +214,9 @@ Each script runs:
    build;
 2. a **launch test**: renders the demo and verifies both the UI and the 3D
    bonds are visible;
-3. a **feature test**: reactions, all three exports and the Settings window.
+3. a **feature test**: reactions, all three exports, the Settings window, a
+   lab data save → wipe → open round trip (including the `.bak` backup) and
+   a Library screenshot.
 
 Cross-check other platforms from Linux:
 
@@ -195,7 +233,7 @@ cargo check --workspace --all-targets --target aarch64-apple-darwin
 | `--demo` | Start with the example shelf |
 | `--lite` / `--full` | Force graphics quality |
 | `VALENCE_SCREENSHOT=path` | Launch test: screenshot when ready (labels hidden), verify content, exit 0/3/4 |
-| `VALENCE_FEATURE_TEST=dir` | Drive reactions, exports and settings end to end, then exit |
+| `VALENCE_FEATURE_TEST=dir` | Drive reactions, exports, settings, lab data save/open and the Library end to end, then exit |
 | `VALENCE_EXPORT_DIR=dir` | Write exports here instead of `Pictures/Valence` |
 | `VALENCE_DOC_SHOT=path` | Documentation screenshot with labels, then exit (`VALENCE_TAB`, `VALENCE_SETTINGS=1`) |
 | `VALENCE_SHOWCASE=name` | Build one compound (e.g. `caffeine`) and spin it (`VALENCE_SPIN` deg/s) for recordings |
