@@ -441,3 +441,39 @@ pub fn document_ui(ctx: &egui::Context, doc: &mut Document, view: egui::Rect, no
         painter.galley(rect.min + egui::vec2(14.0, 8.0), galley, col);
     }
 }
+
+/// macOS: the menu bar's "Quit Valence" (Cmd+Q) normally ends the app at
+/// once. Point it at the window's close action instead, so it goes through
+/// the same "Save changes?" prompt as the close button. Runs until the menu
+/// exists, then stops. (The Dock's Quit still ends the app directly.)
+#[cfg(target_os = "macos")]
+pub fn route_mac_quit(_main_thread: bevy::ecs::system::NonSendMarker, mut done: Local<bool>) {
+    use objc2::sel;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+    if *done {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(menu) = app.mainMenu() else {
+        return; // not built yet: try again next frame
+    };
+    for i in 0..menu.numberOfItems() {
+        let Some(sub) = menu.itemAtIndex(i).and_then(|item| item.submenu()) else {
+            continue;
+        };
+        for j in 0..sub.numberOfItems() {
+            if let Some(item) = sub.itemAtIndex(j)
+                && item.action() == Some(sel!(terminate:))
+            {
+                // SAFETY: performClose: is a standard NSWindow action, sent
+                // to the key window through the responder chain.
+                unsafe { item.setAction(Some(sel!(performClose:))) };
+                *done = true;
+            }
+        }
+    }
+}

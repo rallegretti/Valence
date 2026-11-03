@@ -55,7 +55,9 @@ src/            Bevy 0.20 front end
   crash.rs      panic hook → crash log, catch_unwind guard
   settings_file.rs  key = value settings file
   debug.rs      demo scene and test/doc tooling (see below)
+build.rs        Windows: embeds the icon and version info in the .exe
 scripts/        check.sh (macOS/Linux), check.ps1 (Windows)
+packaging/      release packaging per platform, app icon source
 ```
 
 ## Chemistry model
@@ -224,6 +226,38 @@ Cross-check other platforms from Linux:
 rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
 cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 cargo check --workspace --all-targets --target aarch64-apple-darwin
+```
+
+## Releasing
+
+Everything is built on your own machines; GitHub only hosts the results.
+Bump `version` in `Cargo.toml` first. Each script writes to `dist/`.
+
+| Platform | Run on | Command | Output |
+|---|---|---|---|
+| Linux | Linux with Docker | `packaging/linux/package.sh` | `valence_<v>_amd64.deb`, `Valence-<v>-x86_64.AppImage` |
+| macOS | a Mac | `packaging/macos/package.sh` | `Valence-<v>-macos-universal.zip` |
+| Windows | Windows | `.\packaging\windows\package.ps1` | `Valence-<v>-windows-x86_64.zip` |
+
+- **Linux** builds inside an Ubuntu 22.04 container (`packaging/linux/Dockerfile`),
+  so the packages need only glibc 2.35. `--local` builds on the host instead.
+  The AppImage needs `appimagetool` on `PATH` or in `APPIMAGETOOL`.
+- **macOS** builds both architectures and joins them with `lipo` into one
+  universal `Valence.app`. Set `MACOS_SIGN_IDENTITY` to the Developer ID
+  Application identity and `NOTARY_PROFILE` to a `notarytool` keychain
+  profile to sign, notarize and staple it; otherwise it's signed ad hoc. Run
+  it in a Terminal on the Mac itself: over SSH the login keychain is locked,
+  and `codesign` fails with `errSecInternalComponent`.
+- **Windows** embeds the icon (`assets/icon/valence.ico`) through `build.rs`.
+  The exe isn't code-signed yet.
+- **Icons** come from `packaging/icon.py` (pycairo); `packaging/icons.sh`
+  regenerates `assets/icon/`.
+
+Then tag and publish:
+
+```bash
+git tag v<version> && git push origin v<version>
+gh release create v<version> dist/* --title "Valence <version>" --notes-file <notes>
 ```
 
 ## Debug and documentation tooling (`src/debug.rs`)

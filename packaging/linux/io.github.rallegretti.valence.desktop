@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Valence
+GenericName=Molecule Builder
+Comment=Build molecules in 3D and see how chemistry fits together
+Exec=valence
+Icon=io.github.rallegretti.valence
+Terminal=false
+Categories=Education;Chemistry;
+Keywords=chemistry;molecule;atom;bond;periodic table;
+StartupWMClass=io.github.rallegretti.valence

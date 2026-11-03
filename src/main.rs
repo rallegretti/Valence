@@ -55,8 +55,11 @@ fn main() -> AppExit {
     let backends = gpu::choose_backends();
     let quality = quality::resolve(backends);
 
-    App::new()
-        // A failing system logs a warning instead of taking the game down.
+    let mut app = App::new();
+    #[cfg(target_os = "macos")]
+    app.add_systems(Update, document::route_mac_quit);
+    app
+        // A failing system logs a warning instead of taking the app down.
         .set_error_handler(bevy::ecs::error::warn)
         .add_plugins(
             DefaultPlugins
@@ -76,6 +79,9 @@ fn main() -> AppExit {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Valence: build molecules".into(),
+                        // Wayland app id / X11 WM_CLASS: matches the .desktop
+                        // file so docks show the right name and icon.
+                        name: Some("io.github.rallegretti.valence".into()),
                         resolution: WindowResolution::new(1600, 960),
                         resize_constraints: WindowResizeConstraints {
                             min_width: 720.0,

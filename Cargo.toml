@@ -8,6 +8,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Drag-and-drop 3D molecule builder"
 rust-version = "1.95"
+repository = "https://github.com/rallegretti/Valence"
 
 [dependencies]
 valence_chem = { path = "crates/chem", features = ["serde"] }
@@ -61,6 +62,16 @@ serde_json = "1"
 [target.'cfg(windows)'.dependencies]
 bevy = { version = "0.20.1", default-features = false, features = ["statically-linked-dxc"] }
 
+# macOS: route the menu's Quit (Cmd+Q) through the unsaved-changes prompt.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
+
+# Windows: the app icon and version info in the .exe (build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1.31", default-features = false }
+
 # Fast iteration: optimize dependencies even in debug builds.
 [profile.dev]
 opt-level = 1
@@ -71,7 +82,7 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 # Unwind (not abort) so the crash guard can catch a bug, roll the lab back
-# and keep the game running.
+# and keep the app running.
 panic = "unwind"
 
 # Shipping build: `cargo build --profile dist`

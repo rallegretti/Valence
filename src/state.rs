@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(chem.lab.atom_count(), 1, "partial edit must be rolled back");
         assert!(chem.lab.revision() > before, "caches must see the restore");
         chem.lab.validate().unwrap();
-        // The game carries on normally afterwards.
+        // The app carries on normally afterwards.
         assert!(matches!(
             chem.edit("attach", |lab| lab.attach(c, 1, Vec3::X)),
             Edit::Done(_)

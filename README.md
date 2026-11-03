@@ -40,12 +40,20 @@ name, its 3D shape, and the facts that go with it.
 ## Download
 
 Get the latest version from the **[Releases](https://github.com/rallegretti/Valence/releases)**
-page (also linked on the right side of this page). Pick the file for your
-system, unzip it, and run **Valence**. There's no installer, and nothing else
-to install: no .NET, Java or other runtimes.
+page (also linked on the right side of this page). Nothing else needs
+installing: no .NET, Java or other runtimes.
 
-**What you need:** Windows 10 or 11, macOS (Apple Silicon or Intel), or a
-Linux desktop, plus a graphics card with up-to-date drivers. Nearly any
+| Your system | Download | Then |
+|---|---|---|
+| **Windows** 10 or 11 | `Valence-…-windows-x86_64.zip` | Unzip it and run **Valence.exe** (see the heads-up below) |
+| **macOS** 11 or later (Apple Silicon and Intel) | `Valence-…-macos-universal.zip` | Unzip it and drag **Valence** to Applications |
+| **Ubuntu, Debian, Mint, Pop!_OS** | `valence_…_amd64.deb` | Double-click to install, or `sudo apt install ./valence_…_amd64.deb`; Valence then appears in your apps menu |
+| **Other Linux** | `Valence-…-x86_64.AppImage` | Make it executable (file properties, or `chmod +x Valence-*.AppImage`) and run it |
+
+The Linux downloads work on Ubuntu 22.04 or newer, Debian 12 or newer, and
+other 64-bit distributions from 2022 on.
+
+**What you need:** a graphics card with up-to-date drivers. Nearly any
 computer from the last ten years works; older ones can use the faster
 **Lite** graphics mode (see Troubleshooting).
 

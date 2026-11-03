@@ -182,7 +182,7 @@ fn screenshot_then_exit(
             if state.first_visible.is_none() {
                 state.first_visible = Some(now);
                 info!(
-                    "smoke test: game first visible {now:.1}s after launch (attempt {})",
+                    "smoke test: app first visible {now:.1}s after launch (attempt {})",
                     state.attempts
                 );
             }
