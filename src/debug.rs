@@ -5,6 +5,12 @@
 //!   settles and the game is visible (retrying for up to 90 s while e.g.
 //!   shaders compile), then exit: code 0 if the game showed up, 3 if every
 //!   frame was blank (e.g. locked screen), 4 if no screenshot arrived.
+//! - `VALENCE_DOC_SHOT=path.png`: documentation screenshot with labels shown,
+//!   taken once the 3D scene is ready and settled, then exit. Optional
+//!   `VALENCE_TAB=build|reactions|export` and `VALENCE_SETTINGS=1`.
+//! - `VALENCE_SHOWCASE=name|SMILES`: show one molecule from the compound
+//!   table (e.g. `caffeine`) framed and slowly spinning (`VALENCE_SPIN` deg/s,
+//!   default 30), for screen recordings.
 //! - `VALENCE_WINDOW=w,h`: start with a specific window size.
 //! - `VALENCE_FAKE_DRAG=z,x,y`: pretend element `z` is being dragged with the
 //!   cursor at window position (x, y), to capture drop feedback in a screenshot.
@@ -43,6 +49,25 @@ impl Plugin for DebugPlugin {
             });
             app.insert_resource(ScreenshotPath(path))
                 .add_systems(Update, screenshot_then_exit);
+        }
+        if let Ok(dir) = std::env::var("VALENCE_BURST") {
+            app.insert_resource(Burst {
+                dir: dir.into(),
+                frame: 0,
+                start: None,
+            })
+            .add_systems(Update, burst);
+        }
+        if let Ok(what) = std::env::var("VALENCE_SHOWCASE") {
+            app.insert_resource(Showcase { what, built: false })
+                .add_systems(Update, showcase);
+        }
+        if let Ok(path) = std::env::var("VALENCE_DOC_SHOT") {
+            app.insert_resource(DocShot {
+                path,
+                taken_at: None,
+            })
+            .add_systems(Update, doc_shot);
         }
         if let Ok(dir) = std::env::var("VALENCE_FEATURE_TEST") {
             app.insert_resource(FeatureTest {
@@ -499,5 +524,147 @@ fn feature_test(
             test.step = 10;
         }
         _ => {}
+    }
+}
+
+#[derive(Resource)]
+struct DocShot {
+    path: String,
+    taken_at: Option<f64>,
+}
+
+fn doc_shot(
+    mut commands: Commands,
+    mut shot: ResMut<DocShot>,
+    mut ui: ResMut<crate::state::UiState>,
+    startup: Res<crate::quality::Startup>,
+    time: Res<Time<Real>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    use crate::state::Tab;
+    let now = time.elapsed_secs_f64();
+    match std::env::var("VALENCE_TAB").as_deref() {
+        Ok("reactions") => ui.tab = Tab::Reactions,
+        Ok("export") => ui.tab = Tab::Export,
+        _ => {}
+    }
+    ui.settings_open = std::env::var_os("VALENCE_SETTINGS").is_some();
+    let Some(ready) = startup.scene_ready_at else {
+        return;
+    };
+    match shot.taken_at {
+        None if now > ready + 3.0 => {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(shot.path.clone()));
+            shot.taken_at = Some(now);
+        }
+        Some(t) if now > t + 1.5 => {
+            exit.write(AppExit::Success);
+        }
+        _ => {}
+    }
+}
+
+#[derive(Resource)]
+struct Showcase {
+    what: String,
+    built: bool,
+}
+
+/// Build the named molecule (or SMILES), select and frame it, then spin.
+fn showcase(
+    mut state: ResMut<Showcase>,
+    mut chem: ResMut<Chem>,
+    mut selection: ResMut<Selection>,
+    mut rig: Single<&mut OrbitCam>,
+    time: Res<Time>,
+) {
+    if !state.built {
+        state.built = true;
+        let want = state.what.to_lowercase();
+        let smiles = valence_chem::compounds::KNOWN
+            .iter()
+            .find(|(_, common, iupac)| {
+                common.to_lowercase().starts_with(&want) || iupac.to_lowercase() == want
+            })
+            .map_or(state.what.as_str(), |(smi, _, _)| smi);
+        let built = chem.edit("showcase", |lab| {
+            lab.clear();
+            let g = valence_chem::smiles::parse(smiles).map_err(Reject)?;
+            let ids = lab.add_molecule(&g, V::ZERO)?;
+            for _ in 0..1500 {
+                lab.relax(4, None);
+            }
+            Ok(ids)
+        });
+        match built {
+            crate::state::Edit::Done(ids) => {
+                selection.atom = None; // no selection ring in recordings
+                let pts: Vec<V> = ids
+                    .iter()
+                    .filter_map(|&a| chem.lab.atom(a))
+                    .map(|a| a.pos)
+                    .collect();
+                let c = pts.iter().copied().sum::<V>() / pts.len().max(1) as f32;
+                let r = pts.iter().map(|p| p.distance(c)).fold(0.0f32, f32::max);
+                rig.focus = c;
+                rig.dist = r * 2.6 + 4.0;
+                rig.pitch = -0.3;
+            }
+            _ => error!("showcase: couldn't build {}", state.what),
+        }
+    }
+    let spin: f32 = std::env::var("VALENCE_SPIN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30.0);
+    rig.yaw += spin.to_radians() * time.delta_secs();
+}
+
+/// VALENCE_BURST=dir: save every rendered frame for ~2.5 s (150 frames) once
+/// the scene is ready, then exit. For diagnosing flicker.
+#[derive(Resource)]
+struct Burst {
+    dir: std::path::PathBuf,
+    frame: u32,
+    start: Option<f64>,
+}
+
+fn burst(
+    mut commands: Commands,
+    mut contexts: bevy_egui::EguiContexts,
+    mut b: ResMut<Burst>,
+    startup: Res<crate::quality::Startup>,
+    time: Res<Time<Real>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let now = time.elapsed_secs_f64();
+    let Some(ready) = startup.scene_ready_at else {
+        return;
+    };
+    if now < ready + 2.0 {
+        return;
+    }
+    let start = *b.start.get_or_insert(now);
+    if b.frame < 150
+        && b.frame.is_multiple_of(30)
+        && let Ok(ctx) = contexts.ctx_mut()
+    {
+        let fill = ctx.fonts(|f| f.font_atlas_fill_ratio());
+        info!(
+            "burst: frame {} egui font atlas {:.0}% full",
+            b.frame,
+            fill * 100.0
+        );
+    }
+    if b.frame < 150 {
+        let path = b.dir.join(format!("f{:03}.png", b.frame));
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
+        b.frame += 1;
+    } else if now > start + 6.0 {
+        exit.write(AppExit::Success);
     }
 }

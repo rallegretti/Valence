@@ -151,6 +151,23 @@ impl Lab {
             if total < 2 {
                 continue;
             }
+            // Conjugation: an atom with a lone pair, only single bonds itself,
+            // bonded to an atom that has a double/triple bond (amide N, ring N
+            // in caffeine, phenol O) has one lone pair delocalised into the
+            // p system. That pair isn't a VSEPR domain (the atom goes flat,
+            // sp2); it sits perpendicular to the plane instead.
+            let conjugated = nbrs.len() >= 2
+                && domains.len() > free
+                && self.lone_pairs(id) > 0
+                && !crate::elements::category(a.z).is_metal()
+                && self.neighbors(id).all(|(_, b)| b.order == 1)
+                && self.neighbors(id).any(|(n, b)| {
+                    b.kind == BondKind::Covalent
+                        && self
+                            .neighbors(n)
+                            .any(|(_, b2)| b2.order >= 2 && b2.kind == BondKind::Covalent)
+                });
+            let p_orbital = conjugated.then_some(nbrs.len() + free);
             let mut dom_push = vec![Vec3::ZERO; domains.len()];
             let dir = |i: usize, nbrs: &[(AtomId, Vec3, f32)], domains: &[Vec3]| {
                 if i < nbrs.len() {
@@ -169,10 +186,13 @@ impl Lab {
                 }
             };
             for i in 0..total {
+                if Some(i) == p_orbital {
+                    continue;
+                }
                 let ui = dir(i, &nbrs, &domains);
                 let mut f = Vec3::ZERO;
                 for j in 0..total {
-                    if i == j {
+                    if i == j || Some(j) == p_orbital {
                         continue;
                     }
                     let mut diff = ui - dir(j, &nbrs, &domains);
@@ -195,6 +215,16 @@ impl Lab {
             }
             for (d, p) in domains.iter_mut().zip(dom_push) {
                 *d = (*d + p * 0.2).normalize_or(*d);
+            }
+            if conjugated && let Some(d) = domains.get_mut(free) {
+                let normal = nbrs[0].1.cross(nbrs[1].1).normalize_or_zero();
+                if normal != Vec3::ZERO {
+                    *d = if normal.dot(*d) >= 0.0 {
+                        normal
+                    } else {
+                        -normal
+                    };
+                }
             }
             if let Some(a) = self.atom_mut(id) {
                 a.domains = domains;
@@ -443,5 +473,65 @@ mod perf {
         let adj = lab.adjacency();
         time("repulsion", &mut || lab.repulsion(&adj, &mut force));
         time("angles", &mut || lab.angle_forces(&mut force));
+    }
+}
+
+#[cfg(test)]
+mod placed_molecule_tests {
+    use crate::lab::Lab;
+    use glam::Vec3;
+
+    /// Max distance of the given atoms from their best-fit plane, and the
+    /// closest approach between any two atoms.
+    fn shape_stats(lab: &Lab, ring: &[u32]) -> (f32, f32) {
+        let p: Vec<Vec3> = ring.iter().map(|&a| lab.atom(a).unwrap().pos).collect();
+        let c = p.iter().copied().sum::<Vec3>() / p.len() as f32;
+        // Plane normal: smallest-variance direction (power iteration on the inverse is overkill;
+        // use the normal of the two most separated in-plane vectors).
+        let mut best = Vec3::Y;
+        let mut best_area = 0.0;
+        for i in 0..p.len() {
+            for j in i + 1..p.len() {
+                let n = (p[i] - c).cross(p[j] - c);
+                if n.length() > best_area {
+                    best_area = n.length();
+                    best = n.normalize();
+                }
+            }
+        }
+        let flat = p
+            .iter()
+            .map(|q| (*q - c).dot(best).abs())
+            .fold(0.0, f32::max);
+        let all: Vec<Vec3> = lab.atoms().map(|(_, a)| a.pos).collect();
+        let mut closest = f32::MAX;
+        for i in 0..all.len() {
+            for j in i + 1..all.len() {
+                closest = closest.min(all[i].distance(all[j]));
+            }
+        }
+        (flat, closest)
+    }
+
+    #[test]
+    fn caffeine_unfolds() {
+        let g = crate::smiles::parse("CN1C=NC2=C1C(=O)N(C)C(=O)N2C").unwrap();
+        let mut lab = Lab::new();
+        let ids = lab.add_molecule(&g, Vec3::ZERO).unwrap();
+        for _ in 0..1500 {
+            lab.relax(4, None);
+        }
+        // Ring atoms (SMILES order): N1 C C=N... indices of the 9 ring atoms.
+        let ring: Vec<u32> = [1, 2, 3, 4, 5, 6, 8, 10, 12]
+            .iter()
+            .map(|&i| ids[i])
+            .collect();
+        let (flat, closest) = shape_stats(&lab, &ring);
+        eprintln!("caffeine: ring non-planarity {flat:.2}, closest atoms {closest:.2}");
+        assert!(closest > 0.6, "atoms overlapping: {closest}");
+        assert!(
+            flat < 0.6,
+            "fused rings should be nearly flat, off by {flat}"
+        );
     }
 }

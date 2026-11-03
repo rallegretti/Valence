@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use bevy::{
-    camera::Viewport, ecs::system::SystemParam, prelude::*, render::renderer::RenderAdapterInfo,
-    window::PrimaryWindow,
+    camera::SubCameraView, ecs::system::SystemParam, prelude::*,
+    render::renderer::RenderAdapterInfo, window::PrimaryWindow,
 };
 use bevy_egui::{
     EguiContexts,
@@ -36,6 +36,22 @@ use crate::state::{
 const PANEL_BG: Color32 = Color32::from_rgb(17, 19, 25);
 const CARD_BG: Color32 = Color32::from_rgb(26, 29, 37);
 const MUTED: Color32 = Color32::from_rgb(150, 158, 175);
+
+/// Snap a computed font size to a small set of sizes. egui caches glyphs per
+/// size in one texture atlas and rebuilds the whole atlas when it fills up;
+/// while it rebuilds, the entire interface disappears for a frame. Labels
+/// whose size follows zoom/rotation would mint new sizes every frame and
+/// cause exactly that flicker, so sizes come from this fixed ladder.
+fn snap_font(size: f32) -> f32 {
+    if !size.is_finite() {
+        return 12.0;
+    }
+    if size < 12.0 {
+        size.round().max(6.0)
+    } else {
+        ((size / 2.0).round() * 2.0).min(64.0)
+    }
+}
 
 fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
@@ -115,6 +131,7 @@ pub fn ui_system(
     window: Single<&Window, With<PrimaryWindow>>,
     ready: Res<FontsReady>,
     r: UiRes,
+    mut fades: Local<std::collections::HashMap<AtomId, f32>>,
 ) -> Result {
     if ready.0 < 3 {
         return Ok(());
@@ -283,15 +300,16 @@ pub fn ui_system(
     } else {
         0
     };
-    cam.viewport = if pw > phys_left + 1 && ph > 1 {
-        Some(Viewport {
-            physical_position: UVec2::new(phys_left, 0),
-            physical_size: UVec2::new(pw - phys_left, ph),
-            ..default()
-        })
-    } else {
-        None
-    };
+    // Shift the 3D projection so the scene is centred in the area right of
+    // the panel: render the window as the left part of a wider virtual view
+    // whose centre is the centre of that area. Same scale as a viewport, but
+    // the interface and 3D view are drawn by one camera in one pass.
+    cam.viewport = None;
+    cam.sub_camera_view = (pw > phys_left + 1 && ph > 1).then(|| SubCameraView {
+        full_size: UVec2::new(pw + phys_left, ph),
+        offset: Vec2::ZERO,
+        size: UVec2::new(pw, ph),
+    });
     view.0 = Rect::new(
         left.min(window.width()),
         0.0,
@@ -314,11 +332,13 @@ pub fn ui_system(
         startup: &mut startup,
         compiling: stats.compiling(),
     };
-    let scene = SceneOverlay {
+    let mut scene = SceneOverlay {
         isolation: &isolation,
         capturing: export.capturing(),
         card: export.card.as_ref(),
         diagram,
+        fades: &mut fades,
+        dt: time.delta_secs(),
     };
     overlays(
         &ctx,
@@ -333,7 +353,7 @@ pub fn ui_system(
         view.0,
         now,
         &gfx,
-        &scene,
+        &mut scene,
     );
     Ok(())
 }
@@ -344,6 +364,10 @@ struct SceneOverlay<'a> {
     capturing: bool,
     card: Option<&'a DetailsCard>,
     diagram: Option<Vec<(Role, Vec<AtomId>, u32)>>,
+    /// Per-atom label opacity, eased over time so labels fade rather than
+    /// pop as atoms pass in front of each other.
+    fades: &'a mut std::collections::HashMap<AtomId, f32>,
+    dt: f32,
 }
 
 /// Graphics quality + startup progress, passed to the UI pieces.
@@ -438,7 +462,7 @@ fn periodic_table(
             r.center(),
             Align2::CENTER_CENTER,
             label,
-            FontId::proportional(cell * 0.19),
+            FontId::proportional(snap_font(cell * 0.19)),
             MUTED,
         );
     }
@@ -471,7 +495,7 @@ fn periodic_table(
             r.center() + vec2(0.0, cell * 0.08),
             Align2::CENTER_CENTER,
             element(z).symbol,
-            bold(cell * 0.4),
+            bold(snap_font(cell * 0.4)),
             text_col,
         );
         if cell >= 26.0 {
@@ -479,7 +503,7 @@ fn periodic_table(
                 r.min + vec2(3.0, 2.0),
                 Align2::LEFT_TOP,
                 z.to_string(),
-                FontId::proportional(cell * 0.2),
+                FontId::proportional(snap_font(cell * 0.2)),
                 text_col.gamma_multiply(0.8),
             );
         }
@@ -800,7 +824,7 @@ fn overlays(
     view: Rect,
     now: f64,
     gfx: &Gfx,
-    scene: &SceneOverlay,
+    scene: &mut SceneOverlay,
 ) {
     let capturing = scene.capturing;
     let clip = egui::Rect::from_min_max(pos2(view.min.x, view.min.y), pos2(view.max.x, view.max.y));
@@ -845,15 +869,27 @@ fn overlays(
         let mut order: Vec<&Projected> = atoms.iter().collect();
         order.sort_by(|a, b| b.depth.total_cmp(&a.depth));
         let check_occlusion = order.len() < 600;
+        // Ease towards the target opacity (~0.1 s) so labels never flicker.
+        let ease = 1.0 - (-scene.dt.max(0.0) * 14.0).exp();
+        let live: std::collections::HashSet<AtomId> = order.iter().map(|p| p.id).collect();
+        scene.fades.retain(|id, _| live.contains(id));
         for (i, p) in order.iter().enumerate() {
-            if p.r < 6.0 {
-                continue;
-            }
-            if check_occlusion
-                && order[i + 1..]
+            // How covered is this atom's centre by nearer atoms? 0 = clear, 1 = hidden.
+            let covered = if check_occlusion {
+                order[i + 1..]
                     .iter()
-                    .any(|q| q.depth < p.depth && q.pos.distance(p.pos) < q.r * 0.75)
-            {
+                    .filter(|q| q.depth < p.depth)
+                    .map(|q| (1.0 - q.pos.distance(p.pos) / (q.r * 1.05)).clamp(0.0, 1.0))
+                    .fold(0.0f32, f32::max)
+            } else {
+                0.0
+            };
+            let size_ok = ((p.r - 5.0) / 3.0).clamp(0.0, 1.0);
+            let target = (1.0 - covered * 2.2).clamp(0.0, 1.0) * size_ok;
+            let alpha = scene.fades.entry(p.id).or_insert(target);
+            *alpha += (target - *alpha) * if scene.capturing { 1.0 } else { ease };
+            let alpha = *alpha;
+            if alpha < 0.03 {
                 continue;
             }
             let Some(a) = chem.lab.atom(p.id) else {
@@ -869,13 +905,13 @@ fn overlays(
                 p.pos,
                 Align2::CENTER_CENTER,
                 element(a.z).symbol,
-                bold((p.r * 0.85).clamp(9.0, 30.0)),
-                tc,
+                bold(snap_font((p.r * 0.85).clamp(9.0, 30.0))),
+                tc.gamma_multiply(alpha),
             );
             let q = chem.lab.charge(p.id);
             // Lite has no translucent 3D halos, so ring ions here instead.
             if q != 0 && gfx.quality.active == Quality::Lite {
-                let col = to_egui(if q > 0 { CATION } else { ANION });
+                let col = to_egui(if q > 0 { CATION } else { ANION }).gamma_multiply(alpha);
                 painter.circle_stroke(
                     p.pos,
                     p.r * 1.3,
@@ -885,9 +921,13 @@ fn overlays(
             if q != 0 {
                 let br = (p.r * 0.38).clamp(8.0, 15.0);
                 let bc = p.pos + vec2(p.r * 0.8, -p.r * 0.8);
-                let col = to_egui(if q > 0 { CATION } else { ANION });
+                let col = to_egui(if q > 0 { CATION } else { ANION }).gamma_multiply(alpha);
                 painter.circle_filled(bc, br, col);
-                painter.circle_stroke(bc, br, Stroke::new(1.5, Color32::WHITE));
+                painter.circle_stroke(
+                    bc,
+                    br,
+                    Stroke::new(1.5, Color32::WHITE.gamma_multiply(alpha)),
+                );
                 let label = charge_superscript(q as i32)
                     .replace('⁺', "+")
                     .replace('⁻', "−");
@@ -909,8 +949,8 @@ fn overlays(
                     bc,
                     Align2::CENTER_CENTER,
                     label,
-                    bold(br * 1.05),
-                    Color32::WHITE,
+                    bold(snap_font(br * 1.05)),
+                    Color32::WHITE.gamma_multiply(alpha),
                 );
             }
         }

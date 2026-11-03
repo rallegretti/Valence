@@ -2,7 +2,7 @@
 //! scroll to zoom. Only reacts when the gesture starts over the 3D view.
 
 use bevy::{
-    core_pipeline::tonemapping::Tonemapping,
+    core_pipeline::tonemapping::{DebandDither, Tonemapping},
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
     post_process::bloom::Bloom,
     prelude::*,
@@ -10,7 +10,7 @@ use bevy::{
 
 use crate::quality::{GraphicsQuality, Quality, Startup};
 use crate::state::{Chem, Drag, Pointer};
-use bevy_egui::input::EguiWantsInput;
+use bevy_egui::{PrimaryEguiContext, input::EguiWantsInput};
 
 #[derive(Component, Clone, Copy)]
 pub struct OrbitCam {
@@ -70,6 +70,10 @@ pub fn spawn_camera(mut commands: Commands) {
         // Post-processing is added with the 3D scene (Full only), so the
         // interface's shaders compile first and alone.
         Tonemapping::None,
+        DebandDither::Disabled,
+        // This camera also draws the interface (one camera = no layering
+        // flicker). Its projection is shifted to the right of the panel.
+        PrimaryEguiContext,
         rig.transform(),
         rig,
     ));
@@ -111,6 +115,7 @@ pub fn apply_full_look(
     if quality.active == Quality::Full {
         commands.entity(*camera).insert((
             Tonemapping::TonyMcMapface,
+            DebandDither::Enabled,
             Bloom {
                 intensity: 0.12,
                 ..Bloom::NATURAL

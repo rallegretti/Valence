@@ -36,14 +36,13 @@ mod state;
 mod ui;
 
 use bevy::{
-    camera::{CameraOutputMode, visibility::RenderLayers},
     pbr::PbrPlugin,
     prelude::*,
-    render::{RenderPlugin, render_resource::BlendState},
+    render::RenderPlugin,
     window::{WindowResizeConstraints, WindowResolution},
     winit::{UpdateMode, WinitSettings},
 };
-use bevy_egui::{EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
+use bevy_egui::{EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass};
 use std::time::Duration;
 
 /// Returning `AppExit` makes the process exit code reflect how the app ended
@@ -85,10 +84,11 @@ fn main() -> AppExit {
                     ..default()
                 }),
         )
-        // Full frame rate while focused; throttle to ~10 fps in the background.
+        // Full frame rate while focused; in the background too while anything
+        // moves (see adapt_background_rate), otherwise mostly idle.
         .insert_resource(WinitSettings {
             focused_mode: UpdateMode::Continuous,
-            unfocused_mode: UpdateMode::reactive_low_power(Duration::from_millis(100)),
+            unfocused_mode: UpdateMode::Continuous,
         })
         .add_plugins(EguiPlugin::default())
         .add_plugins(quality::StartupPlugin)
@@ -110,7 +110,7 @@ fn main() -> AppExit {
         .init_resource::<reactions_ui::ReactionLib>()
         .add_systems(
             Startup,
-            (camera::spawn_camera, scene::setup_assets, spawn_ui_camera),
+            (configure_egui, camera::spawn_camera, scene::setup_assets),
         )
         .add_systems(
             EguiPrimaryContextPass,
@@ -130,28 +130,43 @@ fn main() -> AppExit {
                 scene::apply_isolation,
                 scene::sync_transforms,
                 menu::handle_quit,
+                adapt_background_rate,
             )
                 .chain(),
         )
         .run()
 }
 
-/// egui gets its own camera so the 3D camera can be confined to the right
-/// side of the window while the UI covers the whole window.
-fn spawn_ui_camera(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) {
+/// The interface is drawn by the 3D camera itself (see camera.rs). A second,
+/// overlay camera caused the UI and 3D view to fall out of sync and flicker.
+fn configure_egui(mut egui_settings: ResMut<EguiGlobalSettings>) {
     egui_settings.auto_create_primary_context = false;
-    commands.spawn((
-        PrimaryEguiContext,
-        Camera2d,
-        RenderLayers::none(),
-        Camera {
-            order: 1,
-            output_mode: CameraOutputMode::Write {
-                blend_state: Some(BlendState::ALPHA_BLENDING),
-                clear_color: ClearColorConfig::None,
-            },
-            clear_color: ClearColorConfig::Custom(Color::NONE),
-            ..default()
-        },
-    ));
+}
+
+/// Unfocused windows drop to ~4 fps only while nothing is moving; anything
+/// animating (layout settling, the camera turning, effects, an export,
+/// start-up) keeps full frame rate even in the background.
+fn adapt_background_rate(
+    mut winit: ResMut<WinitSettings>,
+    chem: Res<state::Chem>,
+    camera: Single<Ref<Transform>, With<camera::OrbitCam>>,
+    effects: Res<state::Effects>,
+    export: Res<export::ExportJob>,
+    startup: Res<quality::Startup>,
+    drag: Res<state::Drag>,
+) {
+    let animating = chem.lab.is_awake()
+        || camera.is_changed()
+        || !effects.0.is_empty()
+        || export.busy()
+        || startup.phase != quality::Phase::Ready
+        || *drag != state::Drag::None;
+    let want = if animating {
+        UpdateMode::Continuous
+    } else {
+        UpdateMode::reactive_low_power(Duration::from_millis(250))
+    };
+    if winit.unfocused_mode != want {
+        winit.unfocused_mode = want;
+    }
 }
